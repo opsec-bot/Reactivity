@@ -1,0 +1,18 @@
+# Rust
+/rust-client/target/
+**/target/
+
+# Arduino build artifacts
+/firmware/**/build/
+*.elf
+*.bin.tmp
+
+# Serial captures — keep the dir, ignore the logs
+/captures/*
+!/captures/.gitkeep
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
