@@ -23,19 +23,36 @@ Free-form notes. Append as we go.
 
 ## Compile / upload (ESP32 host, Phase 1)
 
-FQBN options per HANDOFF §5: `USBMode=hwcdc CDCOnBoot=default FlashSize=8M PSRAM=disabled`.
+> NOTE: the dedicated `esp32s3usbotg` board variant **presets** flash size (8MB),
+> PSRAM (off), etc. — so the `FlashSize`/`PSRAM`/`CDCOnBoot` options from HANDOFF
+> §5 are INVALID on this FQBN (they only apply to the generic "ESP32S3 Dev
+> Module"). The only knob is `USBMode`.
+>
+> **Use `USBMode=default`, NOT `hwcdc`.** On this board the menu bundles flags:
+>   - `USBMode=hwcdc`   -> usb_mode=1, **cdc_on_boot=1** -> `Serial` = native USB
+>     CDC. We reroute native USB to the host port (GPIO18 HIGH), so that CDC is
+>     physically on the host connector and INVISIBLE to the PC. Result: no serial.
+>   - `USBMode=default` -> usb_mode=0, **cdc_on_boot=0** -> `Serial` = UART0 ->
+>     CP210x bridge -> COM12. ✓ And the OTG controller stays free for EspUsbHost
+>     to claim as host. THIS is what we want.
+> (HANDOFF §5's "Hardware CDC and JTAG" advice was for the generic Dev Module and
+> backfires here. Verified against esp32 core 3.0.0 boards.txt.)
 
 ```powershell
 # Compile
 arduino-cli compile `
-  --fqbn "esp32:esp32:esp32s3usbotg:USBMode=hwcdc,CDCOnBoot=default,FlashSize=8M,PSRAM=disabled" `
+  --fqbn "esp32:esp32:esp32s3usbotg:USBMode=default" `
   ".\firmware\esp32_host"
 
 # Upload (serial/UART mode, via the CP210x bridge on COM12)
 arduino-cli upload -p COM12 `
-  --fqbn "esp32:esp32:esp32s3usbotg:USBMode=hwcdc,CDCOnBoot=default,FlashSize=8M,PSRAM=disabled" `
+  --fqbn "esp32:esp32:esp32s3usbotg:USBMode=default" `
   ".\firmware\esp32_host"
 ```
+
+Side effect (harmless, even useful): opening COM12 asserts DTR/RTS, which
+auto-resets the ESP32. So every capture start reboots the board -> the dongle
+re-enumerates -> the descriptor dump reprints. Good for grabbing descriptors.
 
 ## Capture serial
 
@@ -47,4 +64,14 @@ python .\scripts\capture_serial.py COM12 .\captures\dongle-descriptors.log
 
 ## Observations
 
-- (append findings here)
+- 2026-06-05: First capture attempt with `USBMode=hwcdc` produced only ROM boot
+  text + `E USBH: Device 1 gone` on COM12 — no banner, no reports. Cause: Serial
+  was on native USB CDC (rerouted to host port). Fixed by `USBMode=default`.
+- The Arduino IDE's `serial-monitor` helper held COM12 (`Access is denied`),
+  blocking uploads. Closing the IDE freed it. We're CLI-only now.
+- Phase 1 decode results live in `PROGRESS.md`. Short version:
+  **046D:C547**, mouse on EP 0x81, 13-byte report, no report ID,
+  `[btn8][btn8][dxLE16][dyLE16][wheel8][hwheel8][vendor×5]`.
+- Decoded sanity check: L/R/M/back/fwd all map to bits 0–4 of byte 0; wheel
+  up=+1, down=−1; dx/dy signed and direction-correct. Max flick seen ±53
+  (16-bit width confirmed by descriptor, not by clipping).

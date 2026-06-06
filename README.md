@@ -19,7 +19,7 @@ This is an input-remapping / accessibility / automation device — **not** a gam
 | Phase | What | Status |
 |---|---|---|
 | 0 | Blink + serial heartbeat on both boards | ✅ |
-| 1 | Dump & decode the dongle's HID reports | 🔄 in progress |
+| 1 | Dump & decode the dongle's HID reports | ✅ (046D:C547, 13B mouse report) |
 | 2 | ESP32 -> UART -> Pico -> PC HID mouse pass-through | ⏳ |
 | 3 | Pico CDC + Rust CLI command channel | ⏳ |
 | 4 | Intercept/remap + custom VID/PID + polish | ⏳ |

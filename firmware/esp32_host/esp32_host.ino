@@ -14,6 +14,12 @@
 //
 // Serial goes to UART0 -> CP210x USB-UART bridge (the micro-USB port), NOT the
 // native USB peripheral — the native USB PHY is busy doing host duty.
+//
+// BUILD WITH:  --fqbn esp32:esp32:esp32s3usbotg:USBMode=default
+//   On this board variant, USBMode=default => cdc_on_boot=0 => Serial = UART0 =>
+//   CP210x => COMx. Do NOT use USBMode=hwcdc: it sets cdc_on_boot=1, which maps
+//   Serial onto the native USB CDC that we reroute to the host port (invisible).
+//   See docs/notes.md for the full explanation.
 
 #include <EspUsbHost.h>
 
@@ -36,9 +42,14 @@ public:
     // Blink yellow so the user gets a physical "data is moving" signal.
     digitalWrite(PIN_LED_YELLOW, !digitalRead(PIN_LED_YELLOW));
 
-    // Print the raw report as space-separated hex with a length prefix.
-    // decode_reports.py parses exactly this "[RAW N] xx xx ..." format.
-    Serial.print("[RAW ");
+    // Print the raw report as space-separated hex, tagged with the source
+    // endpoint address and length. This dongle exposes 3 IN endpoints:
+    //   0x81 = mouse (13B), 0x82 = keyboard (17B), 0x83 = Logitech HID++ vendor.
+    // decode_reports.py parses exactly this "[EP xx RAW N] xx xx ..." format.
+    Serial.print("[EP ");
+    if (transfer->bEndpointAddress < 0x10) Serial.print("0");
+    Serial.print(transfer->bEndpointAddress, HEX);
+    Serial.print(" RAW ");
     Serial.print(transfer->actual_num_bytes);
     Serial.print("] ");
     for (int i = 0; i < transfer->actual_num_bytes; i++) {
