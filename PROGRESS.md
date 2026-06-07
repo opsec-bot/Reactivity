@@ -2,6 +2,46 @@
 
 Running log of what's done and what's known. Newest entries on top.
 
+## Phase 2 — End-to-end pass-through ✅ WORKING (2026-06-07)
+
+**Moving the Superlight moves the PC cursor through the full chain**, confirmed
+on hardware:
+
+```
+Superlight ~RF~ Lightspeed dongle --USB host--> DevKitC-1 --UART 1Mbaud--> Pico H --USB HID--> PC
+```
+
+### Host board pivot: OTG board → DevKitC-1
+- Phase 1 reverse-engineering was done on the **ESP32-S3-USB-OTG** board (dongle
+  plugs straight into its USB_HOST port). That board is now **retired**.
+- Phase 2 needs a UART wire from the host to the Pico (GPIO47 → GP1). The OTG
+  board's free pins (GPIO47/48) are **bare solder pads** — no way to attach a
+  jumper without a soldering iron (not on hand). So the host moved to the
+  **ESP32-S3-DevKitC-1-N32R16V**, which has pre-soldered headers.
+- The dongle now reaches the DevKitC's **native USB host** (GPIO19/20) via a
+  **USB-A female breakout** wired to the headers. See `docs/esp32-s3-n32r16v.md`.
+
+### What's verified
+- DevKitC boots cleanly with `FlashMode=opi` (WROOM-2 Octal flash) — boot log
+  shows `Octal Flash Mode Enabled`. Full FQBN in `docs/esp32-s3-n32r16v.md`.
+- **Stage A:** dongle enumerates on native USB host; `frames sent` climbs on
+  motion (e.g. 0 → 554 in ~2 s). USB-over-jumpers is electrically fine, no drops.
+- **Stage B:** UART link GPIO47→GP1 (+ shared GND). Pico reports
+  **`frames ok=N bad=0`** — zero CRC errors across thousands of frames = clean
+  link, good ground. Pico HID `usb=ready` (mounted on PC).
+- **Cursor moves** when the Superlight moves. ✅
+
+### Gotcha worth remembering
+- Opening **COM7** (the DevKitC `UART` port) asserts DTR/RTS and **auto-resets
+  the ESP32**, briefly halting the stream. Watch the **Pico (COM14)** during live
+  runs — it doesn't reset the chain. (Same DTR auto-reset that makes flashing work.)
+
+### Remaining for Phase 2 sign-off
+- Confirm all **5 buttons + scroll** pass through (movement confirmed).
+- **Measure added latency** (target ≤2 ms, ≤5 ms hard cap).
+
+---
+
 ## Phase 1 — Dongle decode ✅ COMPLETE
 
 ### Done

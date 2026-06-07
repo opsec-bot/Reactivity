@@ -11,15 +11,30 @@ Free-form notes. Append as we go.
 - Python 3.13 with pyserial 3.5
 - Rust/cargo present
 
-### COM-port map (2026-06-05)
+### COM-port map (Phase 1, OTG board — 2026-06-05)
 
 | Port | Device | VID:PID | Role |
 |---|---|---|---|
-| COM12 | Silicon Labs CP210x USB-UART bridge | 10C4:EA60 | **ESP32 micro-USB port — upload + serial here** |
-| COM13 | Espressif native USB CDC | 303A:1001 | ESP32 USB_DEV edge connector (factory firmware). Provides 5V to host port. **Disappears after we flash** (native USB gets rerouted to USB_HOST). |
+| COM12 | Silicon Labs CP210x USB-UART bridge | 10C4:EA60 | ESP32-S3-USB-OTG micro-USB port — upload + serial |
+| COM13 | Espressif native USB CDC | 303A:1001 | OTG board USB_DEV edge connector |
 | COM1 | Motherboard serial | — | ignore |
 
-> Pico H not connected yet (Phase 2). When it appears it'll be an ACM / "USB Serial Device".
+### COM-port map (Phase 2, DevKitC host — 2026-06-07)
+
+OTG board **retired** (Phase 1 reverse-engineering done). Host is now the
+**ESP32-S3-DevKitC-1-N32R16V** — its free headers let us attach the UART link to
+the Pico without soldering (the OTG board's GPIO47/48 are bare pads). See
+`docs/esp32-s3-n32r16v.md` for the full board reference + verified build flags.
+
+| Port | Device | VID:PID | Role |
+|---|---|---|---|
+| **COM7** | Silicon Labs CP210x (CP2102) | 10C4:EA60 | **DevKitC `UART` port — upload + serial console** |
+| **COM14** | RP2040 native USB (TinyUSB) | 239A:CAFE | **Pico H — USB HID mouse + CDC** |
+| COM1 | Motherboard serial | — | ignore |
+
+> Both 10C4:EA60 boards share the same VID:PID; they're distinguished only by USB
+> serial number. The DevKitC's native `USB` port (303A:1001) is left **unplugged**
+> so GPIO19/20 are free for the dongle.
 
 ## Compile / upload (ESP32 host, Phase 1)
 

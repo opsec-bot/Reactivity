@@ -1,17 +1,21 @@
 # mouse-passthrough
 
 Hardware mouse pass-through: a Logitech G Pro X Superlight (Lightspeed dongle) is
-parsed by an **ESP32-S3-USB-OTG** (USB host), forwarded over UART to a **Raspberry
+parsed by an **ESP32-S3-DevKitC-1** (USB host), forwarded over UART to a **Raspberry
 Pi Pico H** (USB device), which presents to the PC as a wired USB HID mouse + a CDC
 serial port. A **Rust CLI** on the PC talks to the Pico over CDC for state queries,
 programmatic movement/clicks, and per-button remaps.
+
+> Phase 1 (dongle reverse-engineering) used an ESP32-S3-USB-OTG board; the host
+> moved to the DevKitC-1 for Phase 2 because its headers allow the UART link to the
+> Pico without soldering. See `docs/esp32-s3-n32r16v.md`.
 
 This is an input-remapping / accessibility / automation device — **not** a game cheat.
 
 ```
 [Superlight] ~wireless~ [Lightspeed dongle]
-        -> USB_HOST -> ESP32-S3-OTG (host) -> UART -> Pico H (device) -> USB -> PC
-                                                                      -> CDC  -> Rust CLI
+        -> USB host -> ESP32-S3-DevKitC-1 (host) -> UART -> Pico H (device) -> USB -> PC
+                                                                            -> CDC  -> Rust CLI
 ```
 
 ## Status
@@ -20,7 +24,7 @@ This is an input-remapping / accessibility / automation device — **not** a gam
 |---|---|---|
 | 0 | Blink + serial heartbeat on both boards | ✅ |
 | 1 | Dump & decode the dongle's HID reports | ✅ (046D:C547, 13B mouse report) |
-| 2 | ESP32 -> UART -> Pico -> PC HID mouse pass-through | ⏳ |
+| 2 | ESP32 -> UART -> Pico -> PC HID mouse pass-through | ✅ cursor moves end-to-end (buttons/scroll + latency to confirm) |
 | 3 | Pico CDC + Rust CLI command channel | ⏳ |
 | 4 | Intercept/remap + custom VID/PID + polish | ⏳ |
 

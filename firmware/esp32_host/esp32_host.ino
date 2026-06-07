@@ -1,41 +1,42 @@
 // esp32_host.ino — Phase 2: parse the Lightspeed mouse, forward over UART to Pico.
 //
-// Hardware: ESP32-S3-USB-OTG (USB HOST). Enumerates the Logitech Lightspeed
-// dongle (046D:C547) on the USB_HOST port, parses its 13-byte mouse report
-// (endpoint 0x81), and sends a compact framed event over UART1 to the Pico,
-// which replays it to the PC as a USB HID mouse.
+// Hardware: ESP32-S3-DevKitC-1 (N32R16V, WROOM-2) as USB HOST. Enumerates the
+// Logitech Lightspeed dongle (046D:C547) on the *native* USB OTG controller,
+// parses its 13-byte mouse report (endpoint 0x81), and sends a compact framed
+// event over UART1 to the Pico, which replays it to the PC as a USB HID mouse.
 //
 // (The Phase 1 raw-descriptor dumper version of this file is preserved in git
-//  tag `phase-1`.)
+//  tag `phase-1`. The earlier ESP32-S3-USB-OTG variant is in git history — we
+//  switched host boards because the OTG board's free pins need soldering.)
 //
-// BUILD WITH:  --fqbn esp32:esp32:esp32s3usbotg:USBMode=default
-//   USBMode=default => cdc_on_boot=0 => `Serial` = UART0 => CP210x => COMx (debug
-//   console). Do NOT use hwcdc (it maps Serial onto the native USB we reroute to
-//   the host port). See docs/notes.md.
+// BUILD WITH (generic ESP32S3 Dev Module — there's no DevKitC variant). The
+// N32R16V is a WROOM-2 with Octal (OPI) flash, so FlashMode=opi is mandatory or
+// it boot-loops. Full rationale in docs/esp32-s3-n32r16v.md.
+//   --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashMode=opi,FlashSize=16M,PSRAM=disabled"
+//   - USBMode=default  -> USB-OTG controller free for the EspUsbHost host driver
+//   - CDCOnBoot=default -> Serial = UART0 = CP210x = the "UART" port = COMx
+//                          (survives the OTG PHY being claimed for host)
 //
-// Power: USB_DEV edge connector must be plugged into a 5V source to power the
-// host port. micro-USB provides the debug console (and power).
+// Power for the dongle: the native USB OTG controller does NOT drive VBUS on
+// this board. We feed the dongle 5V from a header pin (5V <- J1 "5V"). See wiring.
 //
-// UART link (3.3V, no level shift):
+// Wiring — USB-A female breakout to the DevKitC headers:
+//   USB-A  5V  (red)   -> 5V    (J1, pin 21)   [powers the dongle]
+//   USB-A  D-  (white) -> GPIO19 (J3, pin 20)  [native USB D-]
+//   USB-A  D+  (green) -> GPIO20 (J3, pin 19)  [native USB D+]
+//   USB-A  GND (black) -> GND   (J3, pin 21)
+//   Keep D+/D- short and equal length.
+//
+// UART link to the Pico (3.3V, no level shift):
 //   ESP32 GPIO47 (TX) -> Pico GP1 (UART0 RX)
 //   ESP32 GPIO48 (RX) <- Pico GP0 (UART0 TX)   [reverse channel, Phase 3]
 //   GND <-> GND
-//   Chose 47/48 because the board's other free pins (45,46,3) are strapping
-//   pins and 26 is a flash pin.
 //
 // Mouse report layout (IF0, EP 0x81, 13 bytes, no report ID):
 //   [0]=buttons(bit0=L,1=R,2=M,3=back,4=fwd) [1]=btns9-16 [2..3]=dX i16 LE
 //   [4..5]=dY i16 LE [6]=wheel i8 [7]=hwheel i8 [8..12]=vendor
 
 #include <EspUsbHost.h>
-
-// --- ESP32-S3-USB-OTG board control pins ---
-static const int PIN_USB_SEL     = 18;
-static const int PIN_DEV_VBUS_EN = 12;
-static const int PIN_BOOST_EN    = 13;
-static const int PIN_LIMIT_EN    = 17;
-static const int PIN_LED_GREEN   = 15;
-static const int PIN_LED_YELLOW  = 16;
 
 // --- UART1 to the Pico ---
 static const int PIN_UART_TX = 47;
@@ -94,32 +95,22 @@ public:
 
     sendMouseFrame(buttons, dx, dy, wheel, hwheel);
     g_frames++;
-    digitalWrite(PIN_LED_YELLOW, !digitalRead(PIN_LED_YELLOW));  // traffic blink
   }
 
   void onGone(const usb_host_client_event_msg_t *) override {
     Serial.println("[esp32] dongle disconnected");
-    digitalWrite(PIN_LED_YELLOW, LOW);
   }
 };
 
 MouseForwarder dongle;
 
 void setup() {
-  pinMode(PIN_BOOST_EN,    OUTPUT); digitalWrite(PIN_BOOST_EN,    LOW);
-  pinMode(PIN_DEV_VBUS_EN, OUTPUT); digitalWrite(PIN_DEV_VBUS_EN, HIGH);
-  pinMode(PIN_LIMIT_EN,    OUTPUT); digitalWrite(PIN_LIMIT_EN,    HIGH);
-  pinMode(PIN_USB_SEL,     OUTPUT); digitalWrite(PIN_USB_SEL,     HIGH);
-  pinMode(PIN_LED_GREEN,   OUTPUT); digitalWrite(PIN_LED_GREEN,   HIGH);
-  pinMode(PIN_LED_YELLOW,  OUTPUT); digitalWrite(PIN_LED_YELLOW,  LOW);
-  delay(200);
-
-  Serial.begin(115200);                                   // debug console -> COMx
+  Serial.begin(115200);                                   // debug console -> CP2102 "UART" port -> COMx
   Serial1.begin(UART_BAUD, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);  // link to Pico
   delay(1500);
   Serial.println();
-  Serial.println("===== Phase 2: Mouse Forwarder =====");
-  Serial.println("Green LED on = host mode. Move the Superlight; yellow LED = traffic.");
+  Serial.println("===== Phase 2: Mouse Forwarder (DevKitC-1 host) =====");
+  Serial.println("Waiting for dongle on native USB (GPIO19/20). Move the Superlight.");
 
   dongle.begin();
 }
