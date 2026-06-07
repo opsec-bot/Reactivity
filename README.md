@@ -3,8 +3,8 @@
 Hardware mouse pass-through: a Logitech G Pro X Superlight (Lightspeed dongle) is
 parsed by an **ESP32-S3-DevKitC-1** (USB host), forwarded over UART to a **Raspberry
 Pi Pico H** (USB device), which presents to the PC as a wired USB HID mouse + a CDC
-serial port. A **Rust CLI** on the PC talks to the Pico over CDC for state queries,
-programmatic movement/clicks, and per-button remaps.
+serial port. A **Tauri desktop app** (Rust backend + React UI) on the PC talks to the
+Pico over CDC for state queries, programmatic movement/clicks, and per-button remaps.
 
 > Phase 1 (dongle reverse-engineering) used an ESP32-S3-USB-OTG board; the host
 > moved to the DevKitC-1 for Phase 2 because its headers allow the UART link to the
@@ -25,7 +25,7 @@ This is an input-remapping / accessibility / automation device — **not** a gam
 | 0 | Blink + serial heartbeat on both boards | ✅ |
 | 1 | Dump & decode the dongle's HID reports | ✅ (046D:C547, 13B mouse report) |
 | 2 | ESP32 -> UART -> Pico -> PC HID mouse pass-through | ✅ cursor moves end-to-end (buttons/scroll + latency to confirm) |
-| 3 | Pico CDC + Rust CLI command channel | ⏳ |
+| 3 | Pico CDC + Tauri control app (move/click/scroll/watch) | ✅ 3a done; remap = 3b |
 | 4 | Intercept/remap + custom VID/PID + polish | ⏳ |
 
 See `PROGRESS.md` for the running log and `docs/notes.md` for the lab notebook.
@@ -34,8 +34,8 @@ See `PROGRESS.md` for the running log and `docs/notes.md` for the lab notebook.
 
 ```
 firmware/esp32_host/   ESP32-S3 host-side firmware (Arduino)
-firmware/pico_device/  Pico device-side firmware (Phase 2)
-rust-client/           PC-side Rust CLI (Phase 3)
+firmware/pico_device/  Pico device-side firmware (Phase 2 HID + Phase 3 CDC protocol)
+rust-client/           PC-side Tauri app (Rust + React/Tailwind/shadcn) — Phase 3
 scripts/               serial capture + report decoding helpers
 captures/              raw serial logs (gitignored)
 docs/                  notes & lab notebook

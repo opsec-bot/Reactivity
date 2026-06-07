@@ -2,6 +2,49 @@
 
 Running log of what's done and what's known. Newest entries on top.
 
+## Phase 3a — Tauri control app + Pico CDC protocol ✅ WORKING (2026-06-07)
+
+A **Tauri v2 desktop app** ("Superlight Control", React + Tailwind v4 + shadcn)
+drives the Pico over its USB-CDC serial port with the §9 JSON-line protocol.
+Built and verified; `remap` (the cross-board bit) is deferred to **Phase 3b**.
+
+### Stack
+- `rust-client/` — Tauri v2. Frontend Vite + React 19 + TS + Tailwind v4 +
+  shadcn/ui (slate, dark). Backend Rust: blocking `serialport` on a dedicated
+  `std::thread` (NO async/tokio in our code, §11.6) bridging CDC lines to Tauri
+  events (`serial://line`, `serial://status`).
+- Pico firmware gained a CDC command layer (dependency-free JSON parse).
+
+### Protocol (PC <-> Pico, JSON lines)
+- PC->Pico: `move{dx,dy}` `click{btn}` `scroll{wheel}` `status` `watch{on}`
+  `remap{from,to}`.
+- Pico->PC: `{"type":"ack","what":..}`, `{"type":"status",uptime_ms,esp_alive,
+  frames_ok,frames_bad,watching}` (1 Hz heartbeat, replaced the old plaintext),
+  `{"type":"evt","kind":"mouse",buttons,dx,dy,wheel}` while watching.
+
+### Verified
+- Tauri app compiles: frontend (`pnpm build`, 1873 modules) + backend
+  (`cargo check`, serialport 4.9).
+- Pico reflashed; bidirectional test passed: `status`/`move`/`click`/`watch`
+  all ack, status streams at 1 Hz, `watching` flips true.
+- **Hot-path safety:** the `watch` stream only writes when
+  `Serial.availableForWrite()` has room for the whole line — it drops events
+  rather than blocking passthrough (protects the latency budget).
+
+### Phase 3 acceptance (HANDOFF §10)
+- [x] `rust-client/` compiles cleanly
+- [x] move / click / scroll commands → HID injected on the Pico
+- [x] watch → live event stream
+- [ ] `remap` configures a rule on the ESP32 — **Phase 3b** (needs reverse-UART
+      Pico GP0→ESP IO48 wired + ESP-side handler; the app/firmware already send
+      the §9 type=0x02 frame, the ESP just ignores it for now)
+
+### Remaining
+- Phase 3b: wire reverse UART, ESP32 remap handler + type=0x03 reply relay.
+- Carry-over from Phase 2: all-5-buttons/scroll confirm + latency measurement.
+
+---
+
 ## Phase 2 — End-to-end pass-through ✅ WORKING (2026-06-07)
 
 **Moving the Superlight moves the PC cursor through the full chain**, confirmed
