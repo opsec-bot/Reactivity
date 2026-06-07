@@ -102,10 +102,17 @@ pub fn connect(
     // Tear down any prior connection first.
     disconnect(state);
 
-    let port = serialport::new(&port_name, baud)
+    let mut port = serialport::new(&port_name, baud)
         .timeout(Duration::from_millis(50))
         .open()
         .map_err(|e| format!("open {port_name}: {e}"))?;
+
+    // CRITICAL: Adafruit TinyUSB CDC gates device->host writes on DTR
+    // (tud_cdc_connected()). serialport-rs leaves DTR low on open, which makes
+    // the Pico silently drop every status/evt/ack line. Assert DTR (and RTS) so
+    // it talks back. (pyserial asserts DTR by default — that's why it differed.)
+    let _ = port.write_data_terminal_ready(true);
+    let _ = port.write_request_to_send(true);
 
     let (tx, rx) = mpsc::channel::<ToDevice>();
     state.set(Some(tx));

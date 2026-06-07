@@ -2,6 +2,30 @@
 
 Running log of what's done and what's known. Newest entries on top.
 
+## Phase 3b — Button remap (ESP32 intercept) + DTR fix (2026-06-07)
+
+### DTR fix — the watch/status "doesn't work" bug
+Symptom: app Connected + Control worked, but Status tiles + Watch stayed empty
+(Console showed only outgoing `->` lines, zero incoming `<-`).
+Root cause: **Adafruit TinyUSB CDC gates device->host writes on DTR**
+(`tud_cdc_connected()`); `serialport-rs` leaves DTR low on open, so the Pico
+silently dropped every status/evt/ack line. (pyserial asserts DTR by default —
+why the earlier Python test worked.) Fix: `serial.rs` asserts
+`write_data_terminal_ready(true)` (+ RTS) right after open.
+
+### Remap (button -> button intercept)
+- Flow: app -> Pico (CDC) -> Pico forwards §9 `type=0x02` JSON frame on its
+  reverse UART (GP0 TX) -> ESP32 stores the rule and **rewrites the buttons
+  bitfield at the source** in `onReceive` (`applyRemap`). Identity by default.
+- Scope: button->button and "none" (disable). Keystroke actions (ctrl+c) need a
+  keyboard HID on the Pico — deferred.
+- **New wire required:** Pico **GP0** (pin 1, UART0 TX) -> ESP32 **GPIO48**.
+  (GND already shared; GPIO48 is free on the v1.1 DevKitC — RGB LED is on GPIO38.)
+- ESP firmware: reverse-UART frame parser (`rfeed`) + `handleEspCmd` +
+  `g_remap[5]` table; compiles 23%, flashed to COM7.
+
+---
+
 ## Phase 3a — Tauri control app + Pico CDC protocol ✅ WORKING (2026-06-07)
 
 A **Tauri v2 desktop app** ("Superlight Control", React + Tailwind v4 + shadcn)

@@ -81,7 +81,7 @@ export default function App() {
   const [dx, setDx] = useState("100");
   const [dy, setDy] = useState("0");
   const [remapFrom, setRemapFrom] = useState<string>("side1");
-  const [remapTo, setRemapTo] = useState("ctrl+c");
+  const [remapTo, setRemapTo] = useState("left");
 
   const statusTiles = useMemo(() => {
     const s = d.status;
@@ -448,12 +448,13 @@ export default function App() {
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm">Button remap</CardTitle>
                 <CardDescription>
-                  Maps a physical button to an action on the ESP32. Requires the
-                  reverse-UART channel (Phase 3b) — sends the command regardless.
+                  Rewrites a physical button at the source (the ESP32 intercept).
+                  Pick a target button, or <span className="font-medium">Disable</span> to
+                  drop it. Keystroke actions (e.g. ctrl+c) need a keyboard HID — coming later.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-wrap items-end gap-3">
-                <div className="grid min-w-40 gap-1.5">
+                <div className="grid min-w-36 gap-1.5">
                   <Label className="text-xs">From button</Label>
                   <Select value={remapFrom} onValueChange={setRemapFrom}>
                     <SelectTrigger>
@@ -468,13 +469,21 @@ export default function App() {
                     </SelectContent>
                   </Select>
                 </div>
-                <div className="grid min-w-40 flex-1 gap-1.5">
-                  <Label className="text-xs">To action</Label>
-                  <Input
-                    value={remapTo}
-                    onChange={(e) => setRemapTo(e.target.value)}
-                    placeholder="e.g. ctrl+c"
-                  />
+                <div className="grid min-w-36 gap-1.5">
+                  <Label className="text-xs">To</Label>
+                  <Select value={remapTo} onValueChange={setRemapTo}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {BUTTONS.map((b) => (
+                        <SelectItem key={b.id} value={b.id}>
+                          {b.label}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="none">Disable</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <Button
                   disabled={!d.connected}
