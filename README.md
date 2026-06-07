@@ -26,7 +26,7 @@ This is an input-remapping / accessibility / automation device — **not** a gam
 | 1 | Dump & decode the dongle's HID reports | ✅ (046D:C547, 13B mouse report) |
 | 2 | ESP32 -> UART -> Pico -> PC HID mouse pass-through | ✅ cursor moves end-to-end (buttons/scroll + latency to confirm) |
 | 3 | Pico CDC + Tauri control app (move/click/scroll/watch) | ✅ 3a done; remap = 3b |
-| 4 | Intercept/remap + custom VID/PID + polish | ⏳ |
+| 4 | Custom VID/PID (046D:C547 "Logitech USB Receiver") + remap intercept | ✅ identity done; release/keystroke-remap polish remain |
 
 See `PROGRESS.md` for the running log and `docs/notes.md` for the lab notebook.
 

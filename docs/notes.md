@@ -29,8 +29,11 @@ the Pico without soldering (the OTG board's GPIO47/48 are bare pads). See
 | Port | Device | VID:PID | Role |
 |---|---|---|---|
 | **COM7** | Silicon Labs CP210x (CP2102) | 10C4:EA60 | **DevKitC `UART` port — upload + serial console** |
-| **COM14** | RP2040 native USB (TinyUSB) | 239A:CAFE | **Pico H — USB HID mouse + CDC** |
+| **COM14→COM15** | Pico H — USB HID mouse + CDC | 239A:CAFE → **046D:C547** | After Phase 4 the Pico wears the "Logitech USB Receiver" identity, so Windows assigned a **new COM** (was COM14, now COM15). The app auto-detects both IDs. |
 | COM1 | Motherboard serial | — | ignore |
+
+> A `303A:1001` (Espressif native USB) may also appear — that's an ESP-side port,
+> not our Pico; ignore it for the app.
 
 > Both 10C4:EA60 boards share the same VID:PID; they're distinguished only by USB
 > serial number. The DevKitC's native `USB` port (303A:1001) is left **unplugged**

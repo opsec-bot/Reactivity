@@ -59,8 +59,11 @@ impl SerialState {
     }
 }
 
-const PICO_VID: u16 = 0x239A;
-const PICO_PID: u16 = 0xCAFE;
+// Our device, before and after Phase 4. Pre-Phase-4 it's the TinyUSB default
+// (239A:CAFE); after, it wears the generic "Logitech USB Receiver" identity
+// (046D:C547). Either marks "our device" for auto-select. (In this rig the real
+// dongle is on the ESP32, never the PC, so 046D:C547 here is unambiguously us.)
+const OUR_IDS: [(u16, u16); 2] = [(0x239A, 0xCAFE), (0x046D, 0xC547)];
 
 /// Enumerate serial ports, labelling our Pico if we can spot it.
 pub fn list_ports() -> Result<Vec<PortInfo>, String> {
@@ -70,7 +73,7 @@ pub fn list_ports() -> Result<Vec<PortInfo>, String> {
         let (label, is_pico) = match &p.port_type {
             serialport::SerialPortType::UsbPort(info) => {
                 let product = info.product.clone().unwrap_or_default();
-                let is_pico = info.vid == PICO_VID && info.pid == PICO_PID;
+                let is_pico = OUR_IDS.contains(&(info.vid, info.pid));
                 let tag = if product.is_empty() {
                     format!("{:04X}:{:04X}", info.vid, info.pid)
                 } else {

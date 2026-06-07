@@ -296,6 +296,19 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
 
+  // Phase 4: present to the PC as a generic "Logitech USB Receiver" (046D:C547)
+  // — the same identity the real Superlight dongle would show. Set BEFORE the
+  // USB device enumerates. Generic Logitech ID per HANDOFF §11.3 (no
+  // cheat-device VID/PIDs). On the arduino-pico core USB is already initialized
+  // by the time setup() runs, so detach/attach forces the host to re-read the
+  // new descriptors.
+  TinyUSBDevice.setManufacturerDescriptor("Logitech");
+  TinyUSBDevice.setProductDescriptor("USB Receiver");
+  TinyUSBDevice.setID(0x046D, 0xC547);
+  TinyUSBDevice.detach();
+  delay(20);
+  TinyUSBDevice.attach();
+
   Serial.begin(115200);       // USB CDC: command channel + console
   Serial1.begin(1000000);     // UART0 from the ESP32 (GP1 RX / GP0 TX)
 

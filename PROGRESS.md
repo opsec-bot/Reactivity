@@ -2,6 +2,28 @@
 
 Running log of what's done and what's known. Newest entries on top.
 
+## Phase 4 — Pico USB identity ✅ (2026-06-07)
+
+The Pico now presents to the PC as a generic **"Logitech USB Receiver"
+(046D:C547)** — the same identity the real Superlight dongle would show — instead
+of the TinyUSB default `239A:CAFE`. (Generic Logitech ID, allowed per §11.3; no
+cheat-device IDs.)
+
+- `pico_device.ino` setup(): `TinyUSBDevice.setManufacturerDescriptor("Logitech")`,
+  `setProductDescriptor("USB Receiver")`, `setID(0x046D, 0xC547)`, then
+  `detach()/attach()` to force re-enumeration (arduino-pico inits USB before
+  setup()). Verified: `board list` shows the CDC as **046D:C547**.
+- The HID report descriptor is unchanged, so passthrough/remap behave identically.
+- **COM renumbers on identity change** (new VID/PID = new device to Windows):
+  the Pico's CDC moved COM14 -> **COM15**. The app's `is_pico` now matches both
+  the old (239A:CAFE) and new (046D:C547) IDs, so auto-select still works.
+
+### Remaining Phase 4 (optional polish)
+- README usage section; tag a release (e.g. v0.1.0).
+- (Stretch) keyboard-HID on the Pico to enable keystroke remaps (ctrl+c etc.).
+
+---
+
 ## Phase 3b — Button remap (ESP32 intercept) + DTR fix (2026-06-07)
 
 ### DTR fix — the watch/status "doesn't work" bug
