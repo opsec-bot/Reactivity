@@ -93,3 +93,27 @@ python .\scripts\capture_serial.py COM12 .\captures\dongle-descriptors.log
 - Decoded sanity check: L/R/M/back/fwd all map to bits 0–4 of byte 0; wheel
   up=+1, down=−1; dx/dy signed and direction-correct. Max flick seen ±53
   (16-bit width confirmed by descriptor, not by clipping).
+
+## Future / optional work (post-v0.1.0)
+
+Deferred items, roughly by value. Nothing here blocks v0.1.0 — the full chain
+(passthrough + control app + remap + Logitech identity) works.
+
+- **Latency measurement.** The last unchecked Phase-2 acceptance box (≤2 ms added,
+  ≤5 ms cap). Needs an instrumented test — e.g. a GPIO loopback timed with a logic
+  analyzer (dongle report in → Pico HID out), or a documented method in
+  `scripts/latency_test.py`. Expected sub-2 ms by construction (1 ms dongle poll +
+  ~0.12 ms UART@1Mbaud + ~1 ms Pico USB poll), but unproven by measurement.
+- **Keystroke remaps (keyboard HID).** Today remap is button→button / disable only.
+  Add a keyboard HID interface to the Pico (composite mouse+keyboard via TinyUSB)
+  and a key-combo parser ("ctrl+c", "alt+tab") so the ESP intercept can fire real
+  keystrokes. The app's remap "to" field would regain free-text/keychord entry.
+- **ESP→PC remap reply (§9 type=0x03).** The app currently shows only the Pico's
+  local ack. Have the ESP confirm the applied remap table back through the Pico so
+  the UI can reflect actual ESP state (and surface unknown-action rejections).
+- **Persist remap table on the ESP** (NVS/Preferences) so rules survive a reboot.
+- **App polish:** show the live remap table, a light/dark toggle (currently dark
+  only), and a window icon.
+- **Status-LED tuning:** brightness/idle-breathe taste; maybe a distinct colour for
+  "remap + disconnected".
+- **README usage section:** end-to-end build/flash/wire/run for a fresh clone.
