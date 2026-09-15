@@ -28,7 +28,8 @@ This is an input-remapping / accessibility / automation device — **not** a gam
 | 3 | Pico CDC + Tauri control app (move/click/scroll/watch) | ✅ 3a done; remap = 3b |
 | 4 | Custom VID/PID (046D:C547 "Logitech USB Receiver") + remap intercept | ✅ identity done; release/keystroke-remap polish remain |
 
-See `PROGRESS.md` for the running log and `docs/notes.md` for the lab notebook.
+See `PROGRESS.md` for the running log, `docs/notes.md` for the lab notebook, and
+`docs/PINOUT.md` for the full wiring/pinout reference with diagram.
 
 ## Layout
 

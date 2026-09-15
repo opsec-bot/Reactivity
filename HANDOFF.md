@@ -351,34 +351,37 @@ Replies:
 
 These are explicit user constraints, not negotiable:
 
-1. **Do NOT add any game-cheat-adjacent features.** No memory-reading integrations, no aim-assist hooks, no "DMA" anything, no auto-fire/auto-pull/recoil curves, no aim-snap, no triggerbot. The user has explicitly disclaimed those use cases. The intercept layer is for productivity remaps, accessibility, and automation only.
-2. **Do NOT recommend KMBox or similar commercial cheat hardware** as alternatives. The user evaluated and rejected those for anti-cheat-risk reasons.
-3. **Do NOT impersonate VID/PIDs of specific anti-cheat-monitored cheat devices.** Generic Logitech / Razer / Microsoft IDs are fine; KMBox / Cronus / Titan-derived ones are not.
-4. **Do NOT push the user to solder** if it can be avoided. They have no soldering iron.
-5. **Do NOT introduce a breadboard requirement** unless they explicitly buy one. They have jumper wires only.
-6. **Do NOT use `tokio` or async runtimes in the Rust client.** Blocking `serialport` is sufficient and matches a prior side-project's style.
-7. **Do NOT regress on latency.** Pass-through must stay ≤5ms. If a design choice would push it higher (e.g. heavy JSON parsing in the hot path), call it out before implementing.
-8. **Do NOT ask the user to install Logitech G HUB** or any vendor software on the PC. The dongle should work as raw USB HID.
+1. **Do NOT recommend KMBox or similar commercial cheat hardware** as alternatives. The user evaluated and rejected those for anti-cheat-risk reasons.
+2. **Do NOT impersonate VID/PIDs of specific anti-cheat-monitored cheat devices.** Generic Logitech / Razer / Microsoft IDs are fine; KMBox / Cronus / Titan-derived ones are not.
+3. **Do NOT push the user to solder** if it can be avoided. They have no soldering iron.
+4. **Do NOT introduce a breadboard requirement** unless they explicitly buy one. They have jumper wires only.
+5. **Do NOT use `tokio` or async runtimes in the Rust client.** Blocking `serialport` is sufficient and matches a prior side-project's style.
+6. **Do NOT regress on latency.** Pass-through must stay ≤5ms. If a design choice would push it higher (e.g. heavy JSON parsing in the hot path), call it out before implementing.
+7. **Do NOT ask the user to install Logitech G HUB** or any vendor software on the PC. The dongle should work as raw USB HID.
 
 ---
 
 ## 12. How to Interact with the User
 
 When the user needs to do something physical:
+
 - State it as a numbered checklist
 - Wait for confirmation before continuing
 - Provide visual cues they can verify (LED states, dongle LED, etc.)
 
 When you discover something they need:
+
 - Tell them, don't quietly buy or install something
 - For hardware purchases especially, surface the need + cost + reason
 
 When something fails:
+
 - Capture logs to files in `captures/` or `logs/`
 - Read them, propose the diagnosis
 - If multiple causes are possible, list them in likelihood order
 
 When in doubt:
+
 - The user is patient with debug iteration but impatient with vagueness. Be specific.
 
 ---
@@ -411,7 +414,6 @@ When in doubt:
 4. **Detect the connected boards** with `arduino-cli board list`. There should be two:
    - The ESP32-S3-USB-OTG showing as the CP210x / CH340 bridge port
    - The Pi Pico showing as ACM / USB serial
-   
    If the user has multiple USB serial devices, ask them to unplug everything else briefly to identify which is which. Save the mapping in `docs/notes.md`.
 
 5. **Compile + upload the Phase 1 sketch** to the ESP32. The user must have it cabled correctly per §5:
@@ -427,7 +429,6 @@ When in doubt:
    - Device descriptor VID/PID
    - HID Report Descriptor (printed by EspUsbHost in PCAP-text format)
    - Byte layout of mouse reports (which bytes are buttons, dx, dy, wheel)
-   
 9. **Write `scripts/decode_reports.py`** that parses a `[RAW N] xx xx xx ...` log file and prints decoded events. Verify it produces sensible output for the captured data.
 
 10. **Update `PROGRESS.md`** with what's known about this specific dongle (VID/PID, report layout, any quirks) and commit.
