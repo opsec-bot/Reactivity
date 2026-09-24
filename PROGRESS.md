@@ -2,6 +2,109 @@
 
 Running log of what's done and what's known. Newest entries on top.
 
+## Firmware tab in the Control app ✅ (2026-09-24)
+
+New **Firmware** tab: detects the boards, "Build & flash all" or per board, per-step
+progress (build / flash / verify with timings), live output, actionable failure hints, and
+an automatic serial disconnect before / reconnect after. Backend: `src-tauri/src/flash.rs`
+runs `scripts/flash.py --json` on a std thread and forwards each line as a `flash://event`
+(one run at a time; `exit` is always the last event). `serial::disconnect_blocking` joins the
+reader thread so the COM port is really closed before flashing (the old `disconnect` only
+queued a message). Frontend: `useFlasher` hook (lives in `App`, so a run keeps updating
+while you look at another tab) + `FirmwarePanel`.
+
+Verified: `cargo test` (7 unit + 1 real round trip through Python/arduino-cli, run with
+`--include-ignored`), `tsc` strict + `vite build`, and the real frontend in a browser against
+a mock backend replaying the script's event format: ok run, failed step with hint, backend
+cannot start Python, nothing plugged in, per-board `--only`, switching tabs mid-run, and
+disconnect -> flash -> reconnect. NOT yet verified: a real flash triggered from the running
+Tauri window (the app must be restarted to pick up the new code: `pnpm tauri dev`).
+
+---
+
+## Flash tool ✅ (2026-09-24)
+
+`scripts/flash.py` detects which boards are plugged in (via `arduino-cli board list`
+JSON: CP210x `10C4:EA60` = ESP32, `046D:C547`/`239A:CAFE`/`2E8A:*` serial or a UF2
+drive = Pico), builds the matching sketch and flashes it; a Pico already running this
+firmware is rebooted into its bootloader by the 1200-baud touch, then checked to
+re-enumerate as `046D:C547`. Missing boards are skipped, ambiguous ones need `--esp-port`
+/ `--pico-port`. `--json` emits events for a future GUI button. 15 offline tests in
+`scripts/test_flash.py`.
+
+Tried on the real setup: `--check`, `--json`, `--build-only`, and a full run that flashed
+both boards (Pico via the running-firmware path, 9.7 s, verified back on COM7). Not tried:
+Pico-in-BOOTSEL and unplugged-board paths (unit-tested only). Builds are ~20-30 s each
+normally; they took minutes while a game was hogging the CPU.
+
+---
+
+## Phase 5 — Low-latency pipeline ✅ 1 kHz feed verified on hardware (2026-09-24)
+
+Flashed to the real boards and measured (results at the bottom). End-to-end latency is
+still unmeasured. Originals are kept next to the sketches as `*.ino.orig` (this folder
+is not a git repo).
+
+### What was wrong
+- **ESP32 host was the bottleneck.** `EspUsbHost::task()` was called from `loop()`.
+  It blocks 1 tick in `usb_host_lib_handle_events()` and 1 tick in
+  `usb_host_client_handle_events()` on every pass (tick = 1 ms here), and re-submits
+  the IN transfer only on a `millis()` timer (`(now-last) > interval`, i.e. every
+  >= 2 ms). Net: the dongle was polled at a few hundred Hz, not 1 kHz, and each
+  report waited up to a tick before its callback ran. (Matches the Phase 2 log:
+  0 -> 554 frames in ~2 s.) The old "sub-2 ms by construction" estimate did not hold.
+- **Pico dropped motion.** `handleFrame` sent only `if (usb_hid.ready())`, otherwise
+  the report was discarded. The dongle's 1 ms clock and the USB frame clock drift, so
+  the endpoint is regularly busy at the wrong moment. Injected `move`/`click` had the
+  same drop, and an injected click clobbered held physical buttons (and vice versa).
+- CDC writes (ack/status/error) were unguarded; `Adafruit_USBD_CDC::write()` spins while
+  its FIFO is full, so a GUI that stops reading could stall passthrough. The watch
+  stream also ran `snprintf` per frame on the hot path. UART RX FIFO was 32 bytes.
+
+### What changed
+- **ESP32:** dedicated `usbClientTask` (prio 20) blocks in
+  `usb_host_client_handle_events()` and wakes on completion; `onReceive()` copies the
+  report, **re-arms the transfer immediately**, then remaps + forwards. **Three URBs are
+  kept queued** on EP 0x81 (`MOUSE_URB_DEPTH`): re-arming a single URB was not enough
+  (see Measured). Only the mouse endpoint is armed. `usbLibTask` handles enumeration.
+  `loop()` is cold path only. TX ring buffer so `Serial1.write()` doesn't wait for the wire.
+- **Pico:** coalescing report queue (fold same-button reports, keep press/release edges
+  ordered, never drop motion, chunk to int16/int8); physical|injected buttons merged;
+  hot path (UART -> queue -> USB) has no formatting/CDC/LED work; guarded CDC writes;
+  256-byte UART FIFO; drop instead of accumulating while the host is not mounted.
+- **Status line** gained `rx_hz, tx_hz, lat_avg_us, lat_max_us, merged, q_hwm`
+  (additive; the app ignores unknown keys). ESP heartbeat now prints frames/s.
+
+### Measured (Pico status line, continuous mouse motion, Superlight @ 1 kHz)
+| ESP32 build | UART frames/s into the Pico (`rx_hz`) |
+|---|---|
+| Phase 2/4 (`task()` in `loop()`) | not measured; log implies ~280/s ("0 -> 554 in ~2 s") |
+| Phase 5, one URB re-armed in the callback | 466 - 517 |
+| Phase 5, **three URBs queued** (current) | **941 - 997, mean 958** (15 samples) |
+
+So the mouse was reporting at 1 kHz all along; the ceiling was on our side. (Re-arming
+fast was not the fix; queueing several URBs was. The *why* — a poll slot going empty
+during resubmit — is inferred, the numbers are measured.)
+
+- `frames_bad = 0` across ~140k frames: the UART link is clean.
+- Pico residency (UART frame in -> USB send): **13 us average**, typically 20-36 us max.
+  One report arrived while the IN endpoint was busy and was folded into the next one
+  (`merged`, 1033 us residency) — the old firmware would have dropped it.
+- Injected `move` acked and sent as its own USB report; remap round trip PC -> Pico ->
+  reverse UART -> ESP works (table `0 1 2 4 4`, restored to identity).
+- Queue/inject logic also run unmodified on the host against a fake endpoint: motion
+  conserved exactly (200k-frame soak, overflow, chunking), button edges stay ordered,
+  injected clicks OR with physical buttons and release independently.
+
+### Not verified yet
+- **End-to-end latency** (dongle report in -> PC sees it). `lat_*_us` is Pico-only.
+- Injected **click/scroll** on hardware (host-tested only), dongle unplug/replug
+  (reconnect path), and a long soak.
+- Arming only EP 0x81 worked on this dongle; if another receiver stays silent, that is
+  the first thing to suspect.
+
+---
+
 ## Phase 4 — Pico USB identity ✅ (2026-06-07)
 
 The Pico now presents to the PC as a generic **"Logitech USB Receiver"

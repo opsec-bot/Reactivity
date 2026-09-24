@@ -102,8 +102,11 @@ Deferred items, roughly by value. Nothing here blocks v0.1.0 — the full chain
 - **Latency measurement.** The last unchecked Phase-2 acceptance box (≤2 ms added,
   ≤5 ms cap). Needs an instrumented test — e.g. a GPIO loopback timed with a logic
   analyzer (dongle report in → Pico HID out), or a documented method in
-  `scripts/latency_test.py`. Expected sub-2 ms by construction (1 ms dongle poll +
-  ~0.12 ms UART@1Mbaud + ~1 ms Pico USB poll), but unproven by measurement.
+  `scripts/latency_test.py`. The budget is 1 ms dongle poll + ~0.12 ms UART@1Mbaud +
+  ~1 ms Pico USB poll, **but only if the ESP32 actually polls at 1 kHz** — before
+  Phase 5 it did not (see PROGRESS.md), so "sub-2 ms by construction" was wrong.
+  Phase 5 adds `rx_hz`/`tx_hz`/`lat_*_us` to the Pico status line, which check the
+  rate and the Pico's own residency time; the end-to-end number still needs this.
 - **Keystroke remaps (keyboard HID).** Today remap is button→button / disable only.
   Add a keyboard HID interface to the Pico (composite mouse+keyboard via TinyUSB)
   and a key-combo parser ("ctrl+c", "alt+tab") so the ESP intercept can fire real
