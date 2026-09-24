@@ -145,11 +145,11 @@ Updating later: download the new files from the latest release and repeat Step 3
 
 ```mermaid
 flowchart LR
-    M["🖱️ Wireless mouse"] -. 2.4 GHz .-> D["Receiver dongle"]
-    D -- USB --> E["ESP32-S3<br/><sub>USB host · 1 kHz poll</sub>"]
-    E -- "UART 1 Mbaud<br/>framed + CRC8" --> P["Raspberry Pi Pico<br/><sub>core 0: passthrough<br/>core 1: Lua VM</sub>"]
-    P -- "USB HID mouse" --> PC["💻 PC"]
-    P <-- "USB CDC · JSON lines" --> A["Control app<br/><sub>Tauri · Rust · React</sub>"]
+    M["🖱️ Wireless mouse"] -.->|"2.4 GHz"| D["Receiver dongle"]
+    D -->|"USB"| E["ESP32-S3<br/><sub>USB host · 1 kHz poll</sub>"]
+    E -->|"UART 1 Mbaud<br/>framed + CRC8"| P["Raspberry Pi Pico<br/><sub>core 0: passthrough<br/>core 1: Lua VM</sub>"]
+    P -->|"USB HID mouse"| PC["💻 PC"]
+    P <-->|"USB CDC · JSON lines"| A["Control app<br/><sub>Tauri · Rust · React</sub>"]
     PC --- A
 ```
 
