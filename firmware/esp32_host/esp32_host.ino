@@ -91,6 +91,17 @@ static const int MOUSE_URB_DEPTH = 3;
 static usb_transfer_t *g_urb[MOUSE_URB_DEPTH] = {};
 static bool g_inflight[MOUSE_URB_DEPTH] = {};
 
+// Endpoint recovery. A failed transfer (ERROR / STALL / OVERFLOW / TIMED_OUT —
+// e.g. a glitch while the mouse is switched off or on) HALTS the pipe in
+// ESP-IDF, and every later submit fails until the endpoint is cleared. Without
+// this the bridge sat on "dongle present, no reports" (steady dim green) until
+// the board was power-cycled. Same task-only access rule as above.
+static bool g_ep_halted = false;
+static int  g_last_bad_status = -1;             // for the log line in loop()
+static volatile unsigned long g_recoveries = 0;
+static unsigned long g_stuck_since = 0;          // first failed re-arm, 0 = healthy
+static const unsigned long STUCK_RESTART_MS = 1500;
+
 // --- Phase 3b: button remap (intercept). g_remap[src] = dst button index, or
 //     -1 to drop ("none"). Identity by default = plain passthrough.
 //     Button index: 0=left 1=right 2=middle 3=side1 4=side2.
@@ -236,6 +247,17 @@ public:
     usb_transfer_t *base = g_urb[0];
     if (!base) return;
 
+    if (g_ep_halted) {
+      // halt (no-op if the error already halted it) -> flush (queued URBs come
+      // back as CANCELED, clearing their g_inflight) -> clear (pipe usable again).
+      usb_host_endpoint_halt(base->device_handle, MOUSE_EP);
+      usb_host_endpoint_flush(base->device_handle, MOUSE_EP);
+      usb_host_endpoint_clear(base->device_handle, MOUSE_EP);
+      g_ep_halted = false;
+      g_recoveries = g_recoveries + 1;
+    }
+
+    bool failed = false;
     for (int k = 0; k < MOUSE_URB_DEPTH; k++) {
       if (g_inflight[k]) continue;
       if (k > 0) {
@@ -255,6 +277,22 @@ public:
         x->flags            = base->flags;
       }
       g_inflight[k] = (usb_host_transfer_submit(g_urb[k]) == ESP_OK);
+      if (!g_inflight[k]) failed = true;
+    }
+
+    // Last resort: if the endpoint still refuses transfers after a clear (e.g. a
+    // real device-side STALL, which needs a CLEAR_FEATURE this sketch doesn't
+    // send), reboot. The dongle is re-enumerated from scratch, about 1 s of downtime.
+    if (!failed) {
+      g_stuck_since = 0;
+    } else if (!g_stuck_since) {
+      g_stuck_since = millis() | 1;
+    } else if (millis() - g_stuck_since > STUCK_RESTART_MS) {
+      Serial.println("[esp32] mouse endpoint stuck, restarting");
+      Serial.flush();
+      esp_restart();
+    } else {
+      g_ep_halted = true;   // try the halt/flush/clear cycle again on the next pass
     }
   }
 
@@ -275,8 +313,16 @@ public:
 
     // Cancelled / stalled / device gone: do NOT resubmit from here (the library
     // may be about to free the transfer). The client task re-queues it via
-    // armIfNeeded() once the device is healthy again.
-    if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) return;
+    // armIfNeeded() once the device is healthy again. A real transfer error
+    // halted the pipe, so flag it for the halt/flush/clear cycle there.
+    if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+      if (transfer->status != USB_TRANSFER_STATUS_CANCELED &&
+          transfer->status != USB_TRANSFER_STATUS_NO_DEVICE) {
+        g_ep_halted = true;
+        g_last_bad_status = transfer->status;
+      }
+      return;
+    }
 
     // 1. Copy out what we need...
     uint8_t d[8];
@@ -307,6 +353,8 @@ public:
   void onGone(const usb_host_client_event_msg_t *) override {
     Serial.println("[esp32] dongle disconnected");
     g_dongle_present = false;
+    g_ep_halted = false;
+    g_stuck_since = 0;
     // The library just flushed the endpoint and freed ITS transfer; ours were
     // cancelled with it. Nothing is queued any more; armIfNeeded() waits for a
     // new device. (Our extra URBs are kept allocated and reused on reconnect.)
@@ -409,6 +457,13 @@ void loop() {
   if (now - last > 1000) {
     unsigned long f = g_frames;
     Serial.printf("[esp32] mouse frames sent: %lu (%lu/s)\n", f, (f - last_frames) * 1000UL / (now - last));
+    static unsigned long seen_recoveries = 0;
+    unsigned long r = g_recoveries;
+    if (r != seen_recoveries) {
+      Serial.printf("[esp32] endpoint recovered from transfer error (status %d), %lu total\n",
+                    g_last_bad_status, r);
+      seen_recoveries = r;
+    }
     last = now;
     last_frames = f;
   }
