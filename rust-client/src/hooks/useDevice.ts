@@ -165,6 +165,7 @@ export function useDevice() {
     setEvents,
     log,
     setLog,
+    pushLog,
     watching,
     toggleWatch,
     send,

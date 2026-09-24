@@ -11,6 +11,7 @@
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Sender, TryRecvError};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -43,6 +44,10 @@ enum ToDevice {
 #[derive(Default)]
 pub struct SerialState {
     inner: Mutex<Option<Sender<ToDevice>>>,
+    /// The port-owning thread, kept so `disconnect_blocking` can wait until the
+    /// OS handle is really closed (the thread only notices `Disconnect` between
+    /// 50 ms reads).
+    thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl SerialState {
@@ -122,10 +127,11 @@ pub fn connect(
 
     let app_thread = app.clone();
     let name_thread = port_name.clone();
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name(format!("serial-{port_name}"))
         .spawn(move || reader_loop(app_thread, name_thread, port, rx))
         .map_err(|e| e.to_string())?;
+    *state.thread.lock().unwrap() = Some(handle);
 
     let _ = app.emit(
         "serial://status",
@@ -144,6 +150,17 @@ pub fn disconnect(state: &SerialState) {
         let _ = tx.send(ToDevice::Disconnect);
     }
     state.set(None);
+}
+
+/// Like `disconnect`, but returns only once the reader thread has exited and the
+/// port is closed. Needed before flashing: a COM port that is still open (even
+/// for a few more milliseconds) makes the upload fail with "access denied".
+pub fn disconnect_blocking(state: &SerialState) {
+    disconnect(state);
+    let handle = state.thread.lock().unwrap().take();
+    if let Some(h) = handle {
+        let _ = h.join(); // exits within one 50 ms read timeout
+    }
 }
 
 /// Queue one JSON command line for the device.

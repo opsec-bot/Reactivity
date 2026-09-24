@@ -5,8 +5,10 @@
 //! replies and live events arrive in the frontend as `serial://line` /
 //! `serial://status` events.
 
+mod flash;
 mod serial;
 
+use flash::FlashState;
 use serde_json::json;
 use serial::{PortInfo, SerialState};
 use tauri::{AppHandle, State};
@@ -82,11 +84,33 @@ fn set_watch(state: State<'_, SerialState>, on: bool) -> Result<(), String> {
     serial::send_line(&state, json!({ "cmd": "watch", "on": on }).to_string())
 }
 
+/// Detect which boards are plugged in (read-only). Progress arrives as
+/// `flash://event` lines and always ends with an `exit` event.
+#[tauri::command]
+fn flash_detect(app: AppHandle, flash: State<'_, FlashState>) -> Result<(), String> {
+    flash::start(app, &flash, flash::build_args(true, &[])?, || {})
+}
+
+/// Build and flash the boards that are plugged in (or only `only`, a subset of
+/// "esp32" / "pico"). The serial connection is closed first — an open COM port
+/// cannot be flashed — and the frontend reconnects when the run ends.
+#[tauri::command]
+fn flash_start(
+    app: AppHandle,
+    serial: State<'_, SerialState>,
+    flash: State<'_, FlashState>,
+    only: Option<Vec<String>>,
+) -> Result<(), String> {
+    let args = flash::build_args(false, &only.unwrap_or_default())?;
+    flash::start(app, &flash, args, || serial::disconnect_blocking(&serial))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(SerialState::default())
+        .manage(FlashState::default())
         .invoke_handler(tauri::generate_handler![
             list_serial_ports,
             connect_serial,
@@ -99,6 +123,8 @@ pub fn run() {
             set_remap,
             request_status,
             set_watch,
+            flash_detect,
+            flash_start,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

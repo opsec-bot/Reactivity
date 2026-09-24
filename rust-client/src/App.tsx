@@ -16,6 +16,8 @@ import {
   Zap,
 } from "lucide-react";
 import { useDevice } from "@/hooks/useDevice";
+import { useFlasher } from "@/hooks/useFlasher";
+import { FirmwarePanel } from "@/components/FirmwarePanel";
 import type { MouseButton } from "@/lib/api";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -78,6 +80,12 @@ function StatTile({
 
 export default function App() {
   const d = useDevice();
+  const flasher = useFlasher({
+    connected: d.connected,
+    selectedPort: d.selectedPort,
+    refreshPorts: d.refreshPorts,
+    log: (text) => d.pushLog("sys", text),
+  });
   const [dx, setDx] = useState("100");
   const [dy, setDy] = useState("0");
   const [remapFrom, setRemapFrom] = useState<string>("side1");
@@ -247,10 +255,11 @@ export default function App() {
 
         {/* Controls */}
         <Tabs defaultValue="control">
-          <TabsList className="grid w-full grid-cols-4">
+          <TabsList className="grid w-full grid-cols-5">
             <TabsTrigger value="control">Control</TabsTrigger>
             <TabsTrigger value="watch">Watch</TabsTrigger>
             <TabsTrigger value="remap">Remap</TabsTrigger>
+            <TabsTrigger value="firmware">Firmware</TabsTrigger>
             <TabsTrigger value="console">Console</TabsTrigger>
           </TabsList>
 
@@ -498,6 +507,11 @@ export default function App() {
                 </Button>
               </CardContent>
             </Card>
+          </TabsContent>
+
+          {/* FIRMWARE */}
+          <TabsContent value="firmware" className="mt-4">
+            <FirmwarePanel f={flasher} />
           </TabsContent>
 
           {/* CONSOLE */}

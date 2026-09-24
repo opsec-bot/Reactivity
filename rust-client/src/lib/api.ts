@@ -44,6 +44,37 @@ export type DeviceMessage = DeviceStatus | MouseEvt | AckMsg | Record<string, un
 
 export type MouseButton = "left" | "right" | "middle" | "side1" | "side2";
 
+// ---- Firmware build + flash (scripts/flash.py --json, forwarded as `flash://event`) ----
+
+export type FlashBoard = "esp32" | "pico";
+export type FlashStepName = "build" | "flash" | "verify";
+
+export interface FlashFound {
+  board: FlashBoard;
+  port: string;
+  /** "serial" for a COM port, "uf2conv" for a Pico sitting in BOOTSEL. */
+  protocol: string;
+  state: string;
+  ident: string;
+}
+
+/** One line of the script's output. `error`, `stderr` and `exit` are added by the backend. */
+export type FlashEvent =
+  | { event: "detect"; found: FlashFound[]; skipped: [FlashBoard, string][]; notes: string[] }
+  | {
+      event: "step";
+      board: FlashBoard;
+      step: FlashStepName;
+      status: "start" | "ok" | "fail";
+      detail: string;
+      seconds: number | null;
+    }
+  | { event: "log"; board: FlashBoard; line: string }
+  | { event: "summary"; results: Partial<Record<FlashBoard, "ok" | "fail">>; ok: boolean }
+  | { event: "error"; message: string }
+  | { event: "stderr"; text: string }
+  | { event: "exit"; code: number };
+
 export const api = {
   listPorts: () => invoke<PortInfo[]>("list_serial_ports"),
   connect: (port: string, baud?: number) =>
@@ -57,4 +88,8 @@ export const api = {
   setRemap: (from: string, to: string) => invoke<void>("set_remap", { from, to }),
   requestStatus: () => invoke<void>("request_status"),
   setWatch: (on: boolean) => invoke<void>("set_watch", { on }),
+  /** Read-only: which boards are plugged in. Result arrives as `flash://event`s. */
+  flashDetect: () => invoke<void>("flash_detect"),
+  /** Build + flash. Closes the serial port first. Omit `only` for every detected board. */
+  flashStart: (only?: FlashBoard[]) => invoke<void>("flash_start", { only }),
 };
