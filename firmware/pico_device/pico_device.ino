@@ -14,6 +14,20 @@
 //   ESP32 GPIO48 (RX) <- Pico GP0 (UART0 TX, physical pin 1)   [remap, Phase 3b]
 //   GND <-> GND
 //
+// Latency design (Phase 5):
+//   - Reports never get dropped for a busy endpoint. Full-speed USB carries one
+//     mouse report per 1 ms frame and the ESP32 frames arrive on their own 1 ms
+//     clock, so the two drift and the IN endpoint is often busy at the wrong
+//     moment. Everything goes through a small coalescing queue (see OutRpt).
+//   - Physical and injected input are merged, not interleaved: buttons are
+//     OR'd, motion is summed.
+//   - The hot path (UART -> queue -> USB) does no formatting, no CDC writes and
+//     no LED I/O; those run after it in loop().
+//   - CDC writes are guarded so a PC that stops reading can never stall
+//     passthrough (Adafruit_USBD_CDC::write() spins while its FIFO is full).
+//   - TinyUSB's tud_task() is already IRQ-driven on this core, so the endpoint
+//     becomes ready again without help from loop().
+//
 // UART frame (from ESP32), per HANDOFF §9:
 //   [0xAA][0x55][len=7][type=0x01][buttons, dxLE16, dyLE16, wheel, hwheel][crc8]
 //
@@ -104,39 +118,137 @@ static unsigned long frames_ok = 0, frames_bad = 0;
 
 // ---- Phase 3 state ----
 static bool g_watch = false;             // live event streaming over CDC
-static bool g_release_pending = false;   // non-blocking click release
-static unsigned long g_release_due = 0;
+static bool g_activity = false;          // a frame arrived (drives the LED, off the hot path)
 
-// Send one HID report. Shared by passthrough + injected commands.
-static void sendHid(uint8_t buttons, int16_t x, int16_t y, int8_t wheel, int8_t pan) {
-  if (!usb_hid.ready()) return;
-  mouse_report_t r{ buttons, x, y, wheel, pan };
-  usb_hid.sendReport(0, &r, sizeof(r));
+// ---- Button state: physical (from the ESP32) OR injected (from the PC) ----
+// The PC always sees the union, so an injected click never releases a button
+// the user is holding, and passthrough never swallows an injected click.
+static uint8_t  g_phys_buttons = 0;      // last state reported by the real mouse
+static uint8_t  g_inj_buttons  = 0;      // buttons currently held by injected clicks
+static uint8_t  g_inj_pending  = 0;      // bit i set = injected button i awaits release
+static uint32_t g_inj_release_ms[5];
+
+static inline uint8_t effButtons() { return g_phys_buttons | g_inj_buttons; }
+
+static inline int32_t clampi(int32_t v, int32_t lo, int32_t hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// ---- Outbound report queue (coalescing) ------------------------------------
+//   same button state as the newest entry -> fold the deltas into it
+//   button state changed                  -> new entry (press/release edges keep
+//                                            their order, so short clicks survive)
+//   queue full                            -> fold anyway (never drop motion)
+// flushReports() drains the head whenever the IN endpoint is ready. Deltas are
+// accumulated wide and sent in int16/int8 chunks, so nothing is ever clipped.
+struct OutRpt {
+  uint8_t  buttons;
+  int32_t  x, y;
+  int16_t  wheel, pan;
+  uint32_t t_us;        // arrival of the OLDEST report folded in (latency stat)
+};
+static const uint8_t OQ_SIZE = 16;
+static OutRpt oq[OQ_SIZE];
+static uint8_t oq_head = 0, oq_count = 0;
+
+// Link / latency stats, published in the 1 Hz status line.
+static unsigned long st_merged = 0;      // reports folded into an earlier one
+static uint8_t       st_qhwm = 0;        // queue high-water mark since last status
+static unsigned long st_sent = 0;        // USB reports sent
+static unsigned long st_lat_sum = 0, st_lat_n = 0;
+static uint32_t      st_lat_max = 0;     // us from UART frame arrival to USB send
+
+static void enqueueReport(uint8_t buttons, int32_t dx, int32_t dy, int16_t wheel, int16_t pan) {
+  // Host not enumerated / asleep: drop instead of accumulating a huge jump that
+  // would be dumped on the cursor the moment the PC comes back.
+  if (!TinyUSBDevice.mounted()) return;
+
+  if (oq_count) {
+    OutRpt &t = oq[(oq_head + oq_count - 1) % OQ_SIZE];
+    if (t.buttons == buttons || oq_count == OQ_SIZE) {
+      t.buttons = buttons;   // newest state wins (only matters when full)
+      t.x += dx;  t.y += dy;
+      t.wheel += wheel;  t.pan += pan;
+      st_merged++;
+      return;
+    }
+  }
+  OutRpt &n = oq[(oq_head + oq_count) % OQ_SIZE];
+  n.buttons = buttons;  n.x = dx;  n.y = dy;  n.wheel = wheel;  n.pan = pan;
+  n.t_us = micros();
+  oq_count++;
+  if (oq_count > st_qhwm) st_qhwm = oq_count;
+}
+
+// Send the head of the queue if the endpoint is idle. Cheap enough to call on
+// every pass and straight after every enqueue.
+static void flushReports() {
+  if (!oq_count || !usb_hid.ready()) return;
+  OutRpt &h = oq[oq_head];
+  int32_t cx = clampi(h.x, -32767, 32767);
+  int32_t cy = clampi(h.y, -32767, 32767);
+  int32_t cw = clampi(h.wheel, -127, 127);
+  int32_t cp = clampi(h.pan, -127, 127);
+  mouse_report_t r{ h.buttons, (int16_t)cx, (int16_t)cy, (int8_t)cw, (int8_t)cp };
+  if (!usb_hid.sendReport(0, &r, sizeof(r))) return;   // lost a race with a busy endpoint: stay queued
+
+  uint32_t lat = micros() - h.t_us;
+  st_sent++;  st_lat_sum += lat;  st_lat_n++;
+  if (lat > st_lat_max) st_lat_max = lat;
+
+  h.x -= cx;  h.y -= cy;  h.wheel -= (int16_t)cw;  h.pan -= (int16_t)cp;
+  if (!h.x && !h.y && !h.wheel && !h.pan) {            // fully drained (a pure button edge drains in one send)
+    oq_head = (oq_head + 1) % OQ_SIZE;
+    oq_count--;
+  }
+}
+
+// ---- Watch stream (formatted OFF the hot path) ----
+struct Evt { uint8_t buttons; int16_t dx, dy; int8_t wheel; };
+static const uint8_t EQ_SIZE = 32;
+static Evt eq[EQ_SIZE];
+static uint8_t eq_head = 0, eq_count = 0;
+
+static void pushEvt(uint8_t buttons, int16_t dx, int16_t dy, int8_t wheel) {
+  if (eq_count == EQ_SIZE) return;                     // GUI too slow: drop, never block
+  Evt &e = eq[(eq_head + eq_count) % EQ_SIZE];
+  e.buttons = buttons;  e.dx = dx;  e.dy = dy;  e.wheel = wheel;
+  eq_count++;
+}
+
+// CDC helper: write only if the WHOLE line fits. Adafruit_USBD_CDC::write()
+// spins while its FIFO is full and a terminal holds DTR, which would freeze
+// passthrough if the GUI stops reading.
+static void cdcWrite(const char *s, int n) {
+  if (n > 0 && Serial.availableForWrite() >= n) Serial.write((const uint8_t *)s, n);
+}
+
+static void drainEvts() {
+  for (int i = 0; i < 2 && eq_count; i++) {            // small budget per pass
+    Evt e = eq[eq_head];
+    eq_head = (eq_head + 1) % EQ_SIZE;
+    eq_count--;
+    char b[96];
+    int n = snprintf(b, sizeof(b),
+      "{\"type\":\"evt\",\"kind\":\"mouse\",\"buttons\":%u,\"dx\":%d,\"dy\":%d,\"wheel\":%d}\n",
+      (unsigned)e.buttons, (int)e.dx, (int)e.dy, (int)e.wheel);
+    cdcWrite(b, n);
+  }
 }
 
 static void handleFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
   if (type != TYPE_HID_MOUSE || len != 7) return;
-  mouse_report_t r;
-  r.buttons = payload[0];
-  r.x = (int16_t)(payload[1] | (payload[2] << 8));
-  r.y = (int16_t)(payload[3] | (payload[4] << 8));
-  r.wheel = (int8_t)payload[5];
-  r.pan = (int8_t)payload[6];
+  int16_t dx    = (int16_t)(payload[1] | (payload[2] << 8));
+  int16_t dy    = (int16_t)(payload[3] | (payload[4] << 8));
+  int8_t  wheel = (int8_t)payload[5];
+  int8_t  pan   = (int8_t)payload[6];
 
-  if (usb_hid.ready()) {
-    usb_hid.sendReport(0, &r, sizeof(r));
-    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));  // activity blink
-  }
+  g_phys_buttons = payload[0];
+  enqueueReport(effButtons(), dx, dy, wheel, pan);
+  flushReports();          // out on the very next IN poll if the endpoint is idle
 
-  // Live stream to the GUI — but NEVER block the hot path. Only write when the
-  // CDC TX FIFO has room for the whole line; otherwise drop this event.
-  if (g_watch) {
-    char e[96];
-    int n = snprintf(e, sizeof(e),
-      "{\"type\":\"evt\",\"kind\":\"mouse\",\"buttons\":%u,\"dx\":%d,\"dy\":%d,\"wheel\":%d}\n",
-      (unsigned)r.buttons, (int)r.x, (int)r.y, (int)r.wheel);
-    if (n > 0 && Serial.availableForWrite() >= n) Serial.write((const uint8_t *)e, n);
-  }
+  g_activity = true;
+  if (g_watch) pushEvt(g_phys_buttons, dx, dy, wheel);
 }
 
 static void feed(uint8_t b) {
@@ -211,16 +323,38 @@ static uint8_t btnBit(const char *b) {
 static void ackWhat(const char *what) {
   char b[48];
   int n = snprintf(b, sizeof(b), "{\"type\":\"ack\",\"what\":\"%s\"}\n", what);
-  if (n > 0) Serial.write((const uint8_t *)b, n);
+  cdcWrite(b, n);
 }
 
+// Extra fields (Phase 5) are additive; the app ignores keys it doesn't know.
+//   rx_hz / tx_hz : UART frames received / USB reports sent per second, measured
+//                   since the previous status line. While the mouse moves,
+//                   rx_hz should be ~1000; tx_hz <= rx_hz (coalescing).
+//   lat_*_us      : time a report sat in this firmware (UART frame in -> USB
+//                   send), avg/max since the previous status line. This is the
+//                   Pico's share of the added latency, not the end-to-end total.
+//   merged        : total reports folded into an earlier one (was: dropped).
+//   q_hwm         : deepest the outbound queue got since the previous status.
 static void emitStatus() {
-  char b[160];
+  static unsigned long last_ms = 0, last_ok = 0, last_sent = 0;
+  unsigned long now = millis();
+  unsigned long dt = now - last_ms;
+  if (dt == 0) dt = 1;
+  unsigned long rx_hz = (frames_ok - last_ok) * 1000UL / dt;
+  unsigned long tx_hz = (st_sent - last_sent) * 1000UL / dt;
+  unsigned long lat_avg = st_lat_n ? st_lat_sum / st_lat_n : 0;
+
+  char b[256];
   int n = snprintf(b, sizeof(b),
-    "{\"type\":\"status\",\"uptime_ms\":%lu,\"esp_alive\":%s,\"frames_ok\":%lu,\"frames_bad\":%lu,\"watching\":%s}\n",
-    millis(), frames_ok > 0 ? "true" : "false", frames_ok, frames_bad,
-    g_watch ? "true" : "false");
-  if (n > 0) Serial.write((const uint8_t *)b, n);
+    "{\"type\":\"status\",\"uptime_ms\":%lu,\"esp_alive\":%s,\"frames_ok\":%lu,\"frames_bad\":%lu,\"watching\":%s,"
+    "\"rx_hz\":%lu,\"tx_hz\":%lu,\"lat_avg_us\":%lu,\"lat_max_us\":%lu,\"merged\":%lu,\"q_hwm\":%u}\n",
+    now, frames_ok > 0 ? "true" : "false", frames_ok, frames_bad,
+    g_watch ? "true" : "false",
+    rx_hz, tx_hz, lat_avg, (unsigned long)st_lat_max, st_merged, (unsigned)st_qhwm);
+  cdcWrite(b, n);
+
+  last_ms = now;  last_ok = frames_ok;  last_sent = st_sent;
+  st_lat_sum = 0;  st_lat_n = 0;  st_lat_max = 0;  st_qhwm = 0;
 }
 
 // Forward a PC command to the ESP32 over the reverse UART (Pico GP0 -> ESP IO48),
@@ -234,10 +368,34 @@ static void sendEspCmd(const char *json, uint8_t len) {
   Serial1.write(frame, 5 + len);
 }
 
+// Press now, release ~40 ms later without blocking. Per-button, so overlapping
+// injected clicks each get their own release and never disturb physical buttons.
 static void injectClick(uint8_t bit) {
-  sendHid(bit, 0, 0, 0, 0);          // press
-  g_release_due = millis() + 40;     // release later, without blocking
-  g_release_pending = true;
+  bit &= 0x1F;
+  if (!bit) return;
+  int idx = __builtin_ctz(bit);
+  g_inj_buttons |= bit;
+  g_inj_pending |= bit;
+  g_inj_release_ms[idx] = millis() + 40;
+  enqueueReport(effButtons(), 0, 0, 0, 0);
+  flushReports();
+}
+
+static void releaseInjected() {
+  if (!g_inj_pending) return;
+  uint32_t now = millis();
+  bool changed = false;
+  for (int i = 0; i < 5; i++) {
+    if ((g_inj_pending & (1 << i)) && (int32_t)(now - g_inj_release_ms[i]) >= 0) {
+      g_inj_pending &= ~(1 << i);
+      g_inj_buttons &= ~(1 << i);
+      changed = true;
+    }
+  }
+  if (changed) {
+    enqueueReport(effButtons(), 0, 0, 0, 0);
+    flushReports();
+  }
 }
 
 static void handleCommand(const char *json) {
@@ -248,7 +406,10 @@ static void handleCommand(const char *json) {
     long dx = 0, dy = 0;
     jsonInt(json, "dx", &dx);
     jsonInt(json, "dy", &dy);
-    sendHid(0, (int16_t)dx, (int16_t)dy, 0, 0);
+    // Merged with whatever the real mouse is doing; big moves are chunked by
+    // flushReports() instead of being truncated to int16.
+    enqueueReport(effButtons(), dx, dy, 0, 0);
+    flushReports();
     ackWhat("move");
   } else if (!strcmp(cmd, "click")) {
     char btn[12] = {0};
@@ -258,7 +419,8 @@ static void handleCommand(const char *json) {
   } else if (!strcmp(cmd, "scroll")) {
     long w = 0;
     jsonInt(json, "wheel", &w);
-    sendHid(0, 0, 0, (int8_t)w, 0);
+    enqueueReport(effButtons(), 0, 0, (int16_t)clampi(w, -32767, 32767), 0);
+    flushReports();
     ackWhat("scroll");
   } else if (!strcmp(cmd, "status")) {
     emitStatus();
@@ -266,12 +428,14 @@ static void handleCommand(const char *json) {
     bool on = false;
     jsonBool(json, "on", &on);
     g_watch = on;
+    if (!on) eq_count = 0;   // don't replay stale events next time
     ackWhat("watch");
   } else if (!strcmp(cmd, "remap")) {
     sendEspCmd(json, (uint8_t)strlen(json));
     ackWhat("remap");
   } else {
-    Serial.println("{\"type\":\"error\",\"msg\":\"unknown_cmd\"}");
+    static const char err[] = "{\"type\":\"error\",\"msg\":\"unknown_cmd\"}\n";
+    cdcWrite(err, sizeof(err) - 1);
   }
 }
 
@@ -310,6 +474,10 @@ void setup() {
   TinyUSBDevice.attach();
 
   Serial.begin(115200);       // USB CDC: command channel + console
+  // The core's default RX FIFO is 32 bytes = under 3 frames at 1 Mbaud. A longer
+  // stall (status line, a JSON command) would overrun it and lose frames. Must be
+  // set before begin().
+  Serial1.setFIFOSize(256);
   Serial1.begin(1000000);     // UART0 from the ESP32 (GP1 RX / GP0 TX)
 
   usb_hid.begin();
@@ -319,16 +487,25 @@ void setup() {
 }
 
 void loop() {
-  // Drain the ESP32 UART each pass to minimize passthrough latency.
+  // ---- Hot path: UART -> queue -> USB. Nothing slow may run before this. ----
   while (Serial1.available()) feed((uint8_t)Serial1.read());
+  flushReports();          // the endpoint may have become ready since last pass
 
-  // Service the PC command channel.
+  // ---- Warm path: PC commands and injected-click releases. ----
   pollCdc();
+  releaseInjected();
 
-  // Non-blocking release for an injected click.
-  if (g_release_pending && (long)(millis() - g_release_due) >= 0) {
-    sendHid(0, 0, 0, 0, 0);
-    g_release_pending = false;
+  // ---- Cold path: formatting, LED, status. Runs after the hot path so it can
+  // only ever delay the NEXT pass, and the 256-byte UART FIFO absorbs that. ----
+  drainEvts();
+
+  if (g_activity) {        // rate-limited activity blink (was a pin toggle per frame)
+    g_activity = false;
+    static unsigned long led_ms = 0;
+    if (millis() - led_ms >= 40) {
+      led_ms = millis();
+      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    }
   }
 
   // Periodic status so the GUI shows live frame counters.

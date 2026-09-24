@@ -35,6 +35,24 @@
 // Mouse report layout (IF0, EP 0x81, 13 bytes, no report ID):
 //   [0]=buttons(bit0=L,1=R,2=M,3=back,4=fwd) [1]=btns9-16 [2..3]=dX i16 LE
 //   [4..5]=dY i16 LE [6]=wheel i8 [7]=hwheel i8 [8..12]=vendor
+//
+// Latency design (Phase 5). EspUsbHost::task() must NOT be called from loop():
+// it blocks 1 tick in usb_host_lib_handle_events() and 1 tick in
+// usb_host_client_handle_events() every pass, and only re-submits the IN
+// transfer on a millis() timer ((now-last) > interval => every >=2 ms). That
+// caps the dongle at a few hundred reports/s and delays each one by up to a
+// tick. Instead:
+//   - usbClientTask (high priority) blocks in usb_host_client_handle_events()
+//     and wakes the instant a transfer completes;
+//   - onReceive() copies the report, RE-ARMS THE TRANSFER IMMEDIATELY, and only
+//     then remaps + forwards, so the host controller polls the dongle again on
+//     the very next 1 ms frame;
+//   - MOUSE_URB_DEPTH (3) URBs are kept queued on the endpoint, not one — a
+//     single URB capped the feed at ~500/s (see the comment on that constant);
+//   - only the mouse endpoint (0x81) is armed — the keyboard/HID++ endpoints
+//     carry nothing this bridge uses;
+//   - loop() does the slow work (LED, logging, reverse-UART commands) at low
+//     priority and can never delay a report.
 
 #include <EspUsbHost.h>
 #include <Adafruit_NeoPixel.h>
@@ -58,16 +76,30 @@ static const uint8_t TYPE_HID_MOUSE = 0x01;
 static const uint8_t TYPE_PC_CMD    = 0x02;  // PC->ESP (remap), via Pico reverse UART
 static const uint8_t MOUSE_EP = 0x81;
 
-static unsigned long g_frames = 0;
+static volatile unsigned long g_frames = 0;
+
+// Mouse IN URBs kept queued on EP 0x81. MEASURED on this hardware (Superlight
+// dongle, 1 kHz): one URB at a time = ~500 reports/s even with an immediate
+// re-arm in the callback; three queued = ~960-990/s. (Presumably a poll slot goes
+// empty while a finished URB is resubmitted; several queued URBs keep one ready
+// every frame — the mechanism is inferred, the numbers are measured.) Slot 0 is
+// the library's own transfer; the rest are allocated here. Set to 1 to get the
+// single-URB behaviour back.
+// Touched only from the USB client task (callbacks, arming and onGone all run
+// inside usb_host_client_handle_events()), so no locking.
+static const int MOUSE_URB_DEPTH = 3;
+static usb_transfer_t *g_urb[MOUSE_URB_DEPTH] = {};
+static bool g_inflight[MOUSE_URB_DEPTH] = {};
 
 // --- Phase 3b: button remap (intercept). g_remap[src] = dst button index, or
 //     -1 to drop ("none"). Identity by default = plain passthrough.
 //     Button index: 0=left 1=right 2=middle 3=side1 4=side2.
-static int8_t g_remap[5] = { 0, 1, 2, 3, 4 };
+//     (Written by loop(), read by the USB client task -> volatile.)
+static volatile int8_t g_remap[5] = { 0, 1, 2, 3, 4 };
 
-// --- Status LED state ---
-static unsigned long g_last_frame_ms = 0;  // last report from the dongle
-static bool g_dongle_present = false;      // seen a frame, not yet 'gone'
+// --- Status LED state (written by the USB client task, read by loop()) ---
+static volatile unsigned long g_last_frame_ms = 0;  // last report from the dongle
+static volatile bool g_dongle_present = false;      // seen a frame, not yet 'gone'
 
 static bool remapActive() {
   for (int i = 0; i < 5; i++) if (g_remap[i] != i) return true;
@@ -188,15 +220,80 @@ static void sendMouseFrame(uint8_t buttons, int16_t dx, int16_t dy,
 
 class MouseForwarder : public EspUsbHost {
 public:
+  // Make sure every mouse URB slot is queued. Cheap when they all are (a few
+  // bool checks), so the client task runs it on every wake-up as a watchdog.
+  // Runs only in the USB client task (the same task that mutates usbTransfer[]
+  // on connect/disconnect), so there is no race with the library's bookkeeping.
+  void armIfNeeded() {
+    if (!isReady || usbTransferSize == 0) return;
+
+    // Slot 0 = the library's own mouse transfer (a fresh pointer after every reconnect).
+    if (!g_inflight[0]) {
+      g_urb[0] = nullptr;
+      for (int i = 0; i < usbTransferSize; i++)
+        if (usbTransfer[i] && usbTransfer[i]->bEndpointAddress == MOUSE_EP) { g_urb[0] = usbTransfer[i]; break; }
+    }
+    usb_transfer_t *base = g_urb[0];
+    if (!base) return;
+
+    for (int k = 0; k < MOUSE_URB_DEPTH; k++) {
+      if (g_inflight[k]) continue;
+      if (k > 0) {
+        if (!g_urb[k] && usb_host_transfer_alloc(base->data_buffer_size, 0, &g_urb[k]) != ESP_OK) {
+          g_urb[k] = nullptr;
+          continue;
+        }
+        // Clone the library's transfer (it is only re-pointed at the current device
+        // handle here, never freed, so a late "cancelled" callback can't hit freed memory).
+        usb_transfer_t *x = g_urb[k];
+        x->device_handle    = base->device_handle;
+        x->bEndpointAddress = base->bEndpointAddress;
+        x->callback         = base->callback;
+        x->context          = base->context;
+        x->num_bytes        = base->num_bytes;
+        x->timeout_ms       = base->timeout_ms;
+        x->flags            = base->flags;
+      }
+      g_inflight[k] = (usb_host_transfer_submit(g_urb[k]) == ESP_OK);
+    }
+  }
+
+  // Which URB slot does this completed transfer belong to (-1 = none)?
+  static int urbSlot(const usb_transfer_t *t) {
+    for (int k = 0; k < MOUSE_URB_DEPTH; k++) if (g_urb[k] == t) return k;
+    return -1;
+  }
+
+  // Called by the library from usb_host_client_handle_events(), i.e. inside the
+  // USB client task, the moment the dongle's IN transfer completes.
   void onReceive(const usb_transfer_t *transfer) override {
     // Only the mouse interface (EP 0x81). Ignore keyboard (0x82) / HID++ (0x83).
     if (transfer->bEndpointAddress != MOUSE_EP) return;
-    if (transfer->actual_num_bytes < 8) return;
 
+    const int slot = urbSlot(transfer);
+    if (slot >= 0) g_inflight[slot] = false;   // this URB just left the queue
+
+    // Cancelled / stalled / device gone: do NOT resubmit from here (the library
+    // may be about to free the transfer). The client task re-queues it via
+    // armIfNeeded() once the device is healthy again.
+    if (transfer->status != USB_TRANSFER_STATUS_COMPLETED) return;
+
+    // 1. Copy out what we need...
+    uint8_t d[8];
+    if (transfer->actual_num_bytes < (int)sizeof(d)) {
+      if (slot >= 0) g_inflight[slot] = (usb_host_transfer_submit((usb_transfer_t *)transfer) == ESP_OK);
+      return;
+    }
+    memcpy(d, transfer->data_buffer, sizeof(d));
+
+    // 2. ...and put the URB straight back in the queue, so the host controller
+    //    keeps polling the dongle every 1 ms frame while we parse and forward.
+    if (slot >= 0) g_inflight[slot] = (usb_host_transfer_submit((usb_transfer_t *)transfer) == ESP_OK);
+
+    // 3. Now the actual work.
     g_last_frame_ms = millis();
     g_dongle_present = true;
 
-    const uint8_t *d = transfer->data_buffer;
     uint8_t  buttons = applyRemap(d[0]);   // intercept: rewrite buttons per remap table
     int16_t  dx = (int16_t)(d[2] | (d[3] << 8));
     int16_t  dy = (int16_t)(d[4] | (d[5] << 8));
@@ -204,16 +301,39 @@ public:
     int8_t   hwheel = (int8_t)d[7];
 
     sendMouseFrame(buttons, dx, dy, wheel, hwheel);
-    g_frames++;
+    g_frames = g_frames + 1;   // single writer (this task); volatile ++ is deprecated
   }
 
   void onGone(const usb_host_client_event_msg_t *) override {
     Serial.println("[esp32] dongle disconnected");
     g_dongle_present = false;
+    // The library just flushed the endpoint and freed ITS transfer; ours were
+    // cancelled with it. Nothing is queued any more; armIfNeeded() waits for a
+    // new device. (Our extra URBs are kept allocated and reused on reconnect.)
+    for (int k = 0; k < MOUSE_URB_DEPTH; k++) g_inflight[k] = false;
+    g_urb[0] = nullptr;
   }
 };
 
 MouseForwarder dongle;
+
+// --- USB host service tasks (replace EspUsbHost::task(); see header) ---------
+// Client task: blocks until the client has an event (transfer done, device
+// added/removed) and wakes IMMEDIATELY. The 2 ms timeout is only a watchdog
+// tick so armIfNeeded() can (re)start the transfer after a (re)connect or error.
+static void usbClientTask(void *) {
+  for (;;) {
+    usb_host_client_handle_events(dongle.clientHandle, pdMS_TO_TICKS(2));
+    dongle.armIfNeeded();
+  }
+}
+
+// Library task: enumeration / hub events. Not latency critical; blocks forever
+// until there is something to do instead of burning a tick per pass.
+static void usbLibTask(void *) {
+  uint32_t flags;
+  for (;;) usb_host_lib_handle_events(portMAX_DELAY, &flags);
+}
 
 // Render the status LED. Called at ~50 Hz from loop() — never the hot path, so
 // it can't perturb USB-host timing / latency.
@@ -250,6 +370,9 @@ static void updateLed() {
 
 void setup() {
   Serial.begin(115200);                                   // debug console -> CP2102 "UART" port -> COMx
+  // With no TX ring buffer, uart_write_bytes() blocks until the frame has
+  // physically left the wire (~120 us). A ring buffer makes write() a memcpy.
+  Serial1.setTxBufferSize(256);
   Serial1.begin(UART_BAUD, SERIAL_8N1, PIN_UART_RX, PIN_UART_TX);  // link to Pico
 
   rgb.begin();
@@ -262,20 +385,33 @@ void setup() {
   Serial.println("Waiting for dongle on native USB (GPIO19/20). Move the Superlight.");
 
   dongle.begin();
+
+  // Service the USB host from dedicated tasks pinned to THIS core (usb_host_install
+  // above allocated the USB interrupt here). The client task outranks everything
+  // in the sketch, so loop() can never delay a report.
+  const BaseType_t core = xPortGetCoreID();
+  xTaskCreatePinnedToCore(usbLibTask,    "usb_lib",    4096, nullptr, 10, nullptr, core);
+  xTaskCreatePinnedToCore(usbClientTask, "usb_client", 6144, nullptr, 20, nullptr, core);
 }
 
+// Everything in loop() is cold path: LED, logging, remap commands from the PC.
+// The USB host is serviced by usbClientTask/usbLibTask (see setup()).
 void loop() {
-  dongle.task();
-
   // Reverse channel: remap commands forwarded from the Pico (GP0 -> GPIO48).
   while (Serial1.available()) rfeed((uint8_t)Serial1.read());
 
   updateLed();
 
-  // Throttled heartbeat so we can see frames flowing without flooding the hot path.
-  static unsigned long last = 0;
-  if (millis() - last > 1000) {
-    last = millis();
-    Serial.printf("[esp32] mouse frames sent: %lu\n", g_frames);
+  // Throttled heartbeat. The per-second rate is the number to watch: while the
+  // mouse is moving it should sit near 1000/s (the dongle's poll rate).
+  static unsigned long last = 0, last_frames = 0;
+  unsigned long now = millis();
+  if (now - last > 1000) {
+    unsigned long f = g_frames;
+    Serial.printf("[esp32] mouse frames sent: %lu (%lu/s)\n", f, (f - last_frames) * 1000UL / (now - last));
+    last = now;
+    last_frames = f;
   }
+
+  vTaskDelay(pdMS_TO_TICKS(1));  // yield; nothing here needs to run faster than 1 kHz
 }
