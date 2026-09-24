@@ -1,5 +1,12 @@
 # Claude Code Brief: ESP32 + Pico Mouse Pass-through
 
+> [!IMPORTANT]
+> **Historical document.** This is the original project brief, written at Phase 1. Its
+> status table, board (ESP32-S3-USB-OTG) and "Rust CLI" plan are out of date: the host is now
+> the ESP32-S3-DevKitC-1, the PC side is the Tauri control app, and Phases 0-6 are done.
+> For current state see [`README.md`](README.md) and [`PROGRESS.md`](PROGRESS.md); current
+> build flags live in `scripts/flash.py`. The §9 protocol is still the base of the wire format.
+
 You are continuing an in-progress hardware project. Read this entire brief first. Then start at §13.
 
 ---

@@ -19,6 +19,17 @@ Free-form notes. Append as we go.
 | COM13 | Espressif native USB CDC | 303A:1001 | OTG board USB_DEV edge connector |
 | COM1 | Motherboard serial | — | ignore |
 
+### COM-port map (current — 2026-09-24)
+
+| Port | Device | VID:PID | Role |
+|---|---|---|---|
+| **COM9** | ESP32-S3-DevKitC-1 `UART` port (CP210x) | 10C4:EA60 | flash + serial console |
+| **COM7** | Pico H — USB HID mouse + CDC | 046D:C547 | control app / flashing |
+
+Windows reassigns COM numbers when devices move ports or change identity;
+`python scripts/flash.py --check` prints the live map. The older maps below are kept
+for history.
+
 ### COM-port map (Phase 2, DevKitC host — 2026-06-07)
 
 OTG board **retired** (Phase 1 reverse-engineering done). Host is now the
@@ -40,6 +51,12 @@ the Pico without soldering (the OTG board's GPIO47/48 are bare pads). See
 > so GPIO19/20 are free for the dongle.
 
 ## Compile / upload (ESP32 host, Phase 1)
+
+> **Historical (retired OTG board).** For the current boards use
+> `python scripts/flash.py`, which holds the live FQBNs (ESP32:
+> `esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashMode=opi,FlashSize=16M,PSRAM=disabled`;
+> Pico: `rp2040:rp2040:rpipico:flash=2097152_65536,usbstack=tinyusb` — the 64 KB FS holds
+> the saved Lua script).
 
 > NOTE: the dedicated `esp32s3usbotg` board variant **presets** flash size (8MB),
 > PSRAM (off), etc. — so the `FlashSize`/`PSRAM`/`CDCOnBoot` options from HANDOFF
@@ -119,4 +136,3 @@ Deferred items, roughly by value. Nothing here blocks v0.1.0 — the full chain
   only), and a window icon.
 - **Status-LED tuning:** brightness/idle-breathe taste; maybe a distinct colour for
   "remap + disconnected".
-- **README usage section:** end-to-end build/flash/wire/run for a fresh clone.
