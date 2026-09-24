@@ -54,7 +54,7 @@
 //   - loop() does the slow work (LED, logging, reverse-UART commands) at low
 //     priority and can never delay a report.
 
-#include <EspUsbHost.h>
+#include "src/EspUsbHost/EspUsbHost.h"   // vendored, modified copy (see its README)
 #include <Adafruit_NeoPixel.h>
 #include <string.h>
 #include <stdlib.h>

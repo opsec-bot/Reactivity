@@ -86,7 +86,8 @@ jobs:
             https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@3.0.0 rp2040:rp2040@5.6.0
-          arduino-cli lib install "EspUsbHost@1.0.1" "Adafruit NeoPixel"
+          # EspUsbHost is vendored (modified) in firmware/esp32_host/src/EspUsbHost
+          arduino-cli lib install "Adafruit NeoPixel"
 
       # FQBNs must match TARGETS in scripts/flash.py.
       - name: Build ESP32-S3 host
