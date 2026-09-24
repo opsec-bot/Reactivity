@@ -1,0 +1,211 @@
+# Builds the Windows app + both firmware images and publishes a GitHub Release.
+#
+# Two ways to cut a release:
+#   1. Actions tab -> "Release" -> Run workflow -> pick patch / minor / major.
+#      The next version is worked out from the latest vX.Y.Z tag, tagged, and released.
+#   2. Push a tag yourself:  git tag v1.2.3 && git push origin v1.2.3
+#
+# The version from the tag is stamped into the app (tauri.conf.json / package.json /
+# Cargo.toml) at build time, so nothing has to be bumped by hand in the repo.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: v
+        name: Work out the version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+            last=${last:-v0.0.0}
+            IFS=. read -r major minor patch <<< "${last#v}"
+            case "$BUMP" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              *)     patch=$((patch + 1)) ;;
+            esac
+            tag="v$major.$minor.$patch"
+            echo "Bumping $last -> $tag ($BUMP)"
+          fi
+          if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$tag' is not vMAJOR.MINOR.PATCH"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git tag "${{ steps.v.outputs.tag }}"
+          git push origin "${{ steps.v.outputs.tag }}"
+
+  firmware:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - uses: arduino/setup-arduino-cli@v2
+
+      - name: Install cores and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@3.0.0 rp2040:rp2040@5.6.0
+          arduino-cli lib install "EspUsbHost@1.0.1" "Adafruit NeoPixel"
+
+      # FQBNs must match TARGETS in scripts/flash.py.
+      - name: Build ESP32-S3 host
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,FlashMode=opi,FlashSize=16M,PSRAM=disabled" \
+            --output-dir build/esp32 firmware/esp32_host
+
+      - name: Build Pico device
+        run: |
+          arduino-cli compile \
+            --fqbn "rp2040:rp2040:rpipico:flash=2097152_65536,usbstack=tinyusb" \
+            --output-dir build/pico firmware/pico_device
+
+      - name: Collect
+        run: |
+          mkdir -p dist
+          v=${{ needs.version.outputs.version }}
+          cp build/pico/pico_device.ino.uf2 "dist/Reactivity-Pico-v$v.uf2"
+          # merged.bin = bootloader + partitions + app, flashed at address 0x0
+          cp build/esp32/esp32_host.ino.merged.bin "dist/Reactivity-ESP32-v$v.bin"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: dist/*
+
+  app:
+    needs: version
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust-client
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: rust-client/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: rust-client/src-tauri
+
+      - name: Stamp version ${{ needs.version.outputs.version }}
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          node -e '
+            const fs = require("fs"), v = process.env.VERSION;
+            for (const f of ["package.json", "src-tauri/tauri.conf.json"]) {
+              const j = JSON.parse(fs.readFileSync(f, "utf8"));
+              j.version = v;
+              fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
+            }
+            const c = "src-tauri/Cargo.toml";
+            fs.writeFileSync(c, fs.readFileSync(c, "utf8").replace(/^version = ".*"$/m, `version = "${v}"`));
+          '
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build installer
+        run: pnpm tauri build --bundles nsis
+
+      - name: Collect
+        shell: bash
+        run: |
+          v=${{ needs.version.outputs.version }}
+          mkdir -p ../dist
+          cp src-tauri/target/release/bundle/nsis/*-setup.exe "../dist/Reactivity-Control-v$v-setup.exe"
+          cp src-tauri/target/release/rust-client.exe "../dist/Reactivity-Control-v$v-portable.exe"
+          ls -l ../dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: dist/*
+
+  release:
+    needs: [version, firmware, app]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          cat > notes.md <<'EOF'
+          ## Downloads
+
+          | File | What it's for |
+          |---|---|
+          | `Reactivity-Control-…-setup.exe` | **The PC app.** Install it and open it. |
+          | `Reactivity-Control-…-portable.exe` | Same app with no installer. Just run it. |
+          | `Reactivity-Pico-….uf2` | Firmware for the **Raspberry Pi Pico**. Drag it onto the `RPI-RP2` drive. |
+          | `Reactivity-ESP32-….bin` | Firmware for the **ESP32-S3**. Flash it from the browser at address `0x0`. |
+
+          Step-by-step setup: see the [README](https://github.com/${{ github.repository }}#setup-no-coding-needed).
+
+          EOF
+          gh release create "$TAG" dist/* \
+            --repo "${{ github.repository }}" \
+            --title "Reactivity $TAG" \
+            --notes-file notes.md \
+            --generate-notes
