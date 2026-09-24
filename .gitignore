@@ -11,6 +11,9 @@
 /captures/*
 !/captures/.gitkeep
 
+# Python bytecode (scripts/ — created when the tests import flash.py)
+__pycache__/
+
 # OS / editor cruft
 Thumbs.db
 desktop.ini
