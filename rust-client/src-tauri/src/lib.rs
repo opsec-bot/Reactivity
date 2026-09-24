@@ -84,6 +84,45 @@ fn set_watch(state: State<'_, SerialState>, on: bool) -> Result<(), String> {
     serial::send_line(&state, json!({ "cmd": "watch", "on": on }).to_string())
 }
 
+/// Largest script the Pico accepts (`SCRIPT_MAX_LEN` in script_engine.h).
+const SCRIPT_MAX_LEN: usize = 16 * 1024;
+/// Script bytes per `script_chunk` line: 150 bytes = 200 base64 chars, which
+/// keeps each line inside the firmware's 256-byte command buffer.
+const SCRIPT_CHUNK: usize = 150;
+
+/// Upload a Lua script to the Pico (begin -> chunks -> end) and, if `run`,
+/// start it straight away. Progress and errors come back as `ack` / `error`
+/// lines; the script's own output as `script_log` lines.
+#[tauri::command]
+fn script_upload(state: State<'_, SerialState>, source: String, run: bool) -> Result<(), String> {
+    use base64::Engine as _;
+    let bytes = source.as_bytes();
+    if bytes.is_empty() {
+        return Err("script is empty".into());
+    }
+    if bytes.len() > SCRIPT_MAX_LEN {
+        return Err(format!(
+            "script is {} bytes; the board holds at most {SCRIPT_MAX_LEN}",
+            bytes.len()
+        ));
+    }
+    serial::send_line(&state, json!({ "cmd": "script_begin", "len": bytes.len() }).to_string())?;
+    for chunk in bytes.chunks(SCRIPT_CHUNK) {
+        let d = base64::engine::general_purpose::STANDARD.encode(chunk);
+        serial::send_line(&state, json!({ "cmd": "script_chunk", "d": d }).to_string())?;
+    }
+    serial::send_line(&state, json!({ "cmd": "script_end", "run": run }).to_string())
+}
+
+/// run | stop | save | erase | status for the script already on the board.
+#[tauri::command]
+fn script_command(state: State<'_, SerialState>, action: String) -> Result<(), String> {
+    if !matches!(action.as_str(), "run" | "stop" | "save" | "erase" | "status") {
+        return Err(format!("unknown script action: {action}"));
+    }
+    serial::send_line(&state, json!({ "cmd": format!("script_{action}") }).to_string())
+}
+
 /// Detect which boards are plugged in (read-only). Progress arrives as
 /// `flash://event` lines and always ends with an `exit` event.
 #[tauri::command]
@@ -123,6 +162,8 @@ pub fn run() {
             set_remap,
             request_status,
             set_watch,
+            script_upload,
+            script_command,
             flash_detect,
             flash_start,
         ])

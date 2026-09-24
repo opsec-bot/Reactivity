@@ -40,6 +40,32 @@ export interface AckMsg {
   [k: string]: unknown;
 }
 
+/** State of the on-board Lua script (`script_status` line). */
+export interface ScriptStatus {
+  type: "script_status";
+  state: "idle" | "loading" | "running";
+  /** Bytes of script in the board's RAM (0 = none uploaded). */
+  len: number;
+  /** A script is stored in flash and starts at boot. */
+  saved: boolean;
+  /** Lua heap in use / cap, bytes. */
+  mem: number;
+  mem_max: number;
+  log_dropped: number;
+}
+
+/** Script output: `text` is raw (newlines are the script's), `clear` = ClearLog(). */
+export interface ScriptLog {
+  type: "script_log";
+  text?: string;
+  clear?: boolean;
+}
+
+export type ScriptAction = "run" | "stop" | "save" | "erase" | "status";
+
+/** Largest script the board accepts (SCRIPT_MAX_LEN in script_engine.h). */
+export const SCRIPT_MAX_LEN = 16 * 1024;
+
 export type DeviceMessage = DeviceStatus | MouseEvt | AckMsg | Record<string, unknown>;
 
 export type MouseButton = "left" | "right" | "middle" | "side1" | "side2";
@@ -88,6 +114,10 @@ export const api = {
   setRemap: (from: string, to: string) => invoke<void>("set_remap", { from, to }),
   requestStatus: () => invoke<void>("request_status"),
   setWatch: (on: boolean) => invoke<void>("set_watch", { on }),
+  /** Send a Lua script to the board; `run` starts it (replacing the running one). */
+  scriptUpload: (source: string, run: boolean) =>
+    invoke<void>("script_upload", { source, run }),
+  scriptCommand: (action: ScriptAction) => invoke<void>("script_command", { action }),
   /** Read-only: which boards are plugged in. Result arrives as `flash://event`s. */
   flashDetect: () => invoke<void>("flash_detect"),
   /** Build + flash. Closes the serial port first. Omit `only` for every detected board. */

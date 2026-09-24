@@ -28,6 +28,7 @@ This is an input-remapping / accessibility / automation device — **not** a gam
 | 3 | Pico CDC + Tauri control app (move/click/scroll/watch) | ✅ 3a done; remap = 3b |
 | 4 | Custom VID/PID (046D:C547 "Logitech USB Receiver") + remap intercept | ✅ identity done; release/keystroke-remap polish remain |
 | 5 | Low-latency host/device pipeline (1 kHz host polling, no-drop coalescing queue) | ✅ 1 kHz feed verified on hardware (~960/s, was ~280-500); end-to-end latency still unmeasured |
+| 6 | On-board Lua scripts (G Hub-compatible API, runs on the Pico's core 1, autostarts from flash) | ✅ verified over serial on hardware; physical-button triggers still to try |
 
 See `PROGRESS.md` for the running log, `docs/notes.md` for the lab notebook, and
 `docs/PINOUT.md` for the full wiring/pinout reference with diagram.

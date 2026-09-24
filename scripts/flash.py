@@ -65,7 +65,7 @@ TARGETS = {
     ),
     "pico": Target(
         "pico", "Pico device", ROOT / "firmware" / "pico_device",
-        "rp2040:rp2040:rpipico:flash=2097152_0,usbstack=tinyusb",
+        "rp2040:rp2040:rpipico:flash=2097152_65536,usbstack=tinyusb",
     ),
 }
 ORDER = ("esp32", "pico")

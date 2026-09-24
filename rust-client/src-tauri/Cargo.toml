@@ -25,4 +25,6 @@ serde_json = "1"
 # Blocking serial I/O on a dedicated std::thread — NO async/tokio in our code
 # (HANDOFF §11.6). Tauri's own runtime is separate from this.
 serialport = "4"
+# Lua script upload to the Pico: source goes over the CDC link as base64 chunks.
+base64 = "0.22"
 

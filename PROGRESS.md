@@ -2,6 +2,37 @@
 
 Running log of what's done and what's known. Newest entries on top.
 
+## On-board Lua scripts ✅ (2026-09-24)
+
+New **Scripts** tab: write Lua in the app, "Run on board" uploads it to the Pico, which runs
+it on its **second core** (core 1) with the same API as Logitech G Hub scripts
+(`OnEvent`, `MoveMouseRelative`, `PressMouseButton`, `IsMouseButtonPressed`, `Sleep`,
+`OutputLogMessage`, ...), so G Hub scripts paste in. Extension: `SetMouseButtonBlocked(n, on)`
+hides a physical button from the PC. "Save to board" stores it in flash and it autostarts at
+boot, so it works with the app closed.
+
+- Firmware: Lua 5.4.8 vendored in `firmware/pico_device/src/lua/` (no io/os/package/debug,
+  32-bit numbers, C recursion capped at 64). `script_engine.cpp` owns the VM: 24 KB private
+  stack, 96 KB heap cap, pico-sdk queues to/from core 0 (button edges in; actions and log
+  out). Core 0's hot path only gains one queue push per button edge.
+- Stop is immediate even for `while true do end` or a loop wrapped in `pcall` (count hook +
+  Sleep checks). A stopped or crashed script always releases any button it held.
+- **Flash layout changed**: FQBN is now `flash=2097152_65536` (64 KB LittleFS for the
+  script). The first boot after that formats the FS (~1 s). Saving briefly stalls
+  passthrough (flash writes run with interrupts off).
+- CDC: `script_begin/chunk/end` (base64, 150 B per line), `script_run/stop/save/erase/status`;
+  the board replies `script_status`, `script_log`, and the 1 Hz status gained `"script"`.
+
+Verified on hardware (Pico on COM7, 14 checks over the serial protocol): print/format,
+PROFILE_ACTIVATED, syntax/runtime errors reported, busy loop + pcall-wrapped loop + Sleep
+loop all stop, PROFILE_DEACTIVATED runs, heap cap -> "not enough memory" (board survives),
+200-deep nesting rejected (no stack crash), unsupported-API message, a script moved the real
+cursor 100 px left, oversize upload rejected, save/erase. `cargo check`, `tsc`, `vite build`.
+NOT yet verified: button-triggered events from the physical mouse (needs someone pressing
+buttons), autostart after a power cycle, and the Scripts tab in the running Tauri window.
+
+---
+
 ## Firmware tab in the Control app ✅ (2026-09-24)
 
 New **Firmware** tab: detects the boards, "Build & flash all" or per board, per-step

@@ -4,10 +4,13 @@
 // (via TinyUSB) AND a USB CDC serial port. It:
 //   - replays framed mouse events from the ESP32 (UART0) to the PC  [Phase 2]
 //   - speaks a line-based JSON command protocol on the CDC port      [Phase 3]
-//     (move / click / scroll / status / watch / remap), driven by the
-//     Tauri "Superlight Control" app.
+//     (move / click / scroll / status / watch / remap / script_*), driven by
+//     the Tauri "Superlight Control" app.
+//   - runs a user Lua script (G Hub-style OnEvent) on core 1 — see
+//     script_engine.h. Its output is merged like any other injected input.
 //
-// Build:  --fqbn rp2040:rp2040:rpipico:flash=2097152_0,usbstack=tinyusb
+// Build:  --fqbn rp2040:rp2040:rpipico:flash=2097152_65536,usbstack=tinyusb
+//         (the 64 KB LittleFS partition holds the saved script)
 //
 // Wiring (see docs/notes.md):
 //   ESP32 GPIO47 (TX) -> Pico GP1 (UART0 RX, physical pin 2)
@@ -35,10 +38,16 @@
 //   PC->Pico : {"cmd":"move","dx":100,"dy":-50}  {"cmd":"click","btn":"left"}
 //              {"cmd":"scroll","wheel":1}  {"cmd":"status"}  {"cmd":"watch","on":true}
 //              {"cmd":"remap","from":"side1","to":"ctrl+c"}
+//              {"cmd":"script_begin","len":N}  {"cmd":"script_chunk","d":"<base64, <=200 chars>"}...
+//              {"cmd":"script_end","run":true}  {"cmd":"script_run"}  {"cmd":"script_stop"}
+//              {"cmd":"script_save"}  {"cmd":"script_erase"}  {"cmd":"script_status"}
 //   Pico->PC : {"type":"ack","what":"move"}   {"type":"status",...}
 //              {"type":"evt","kind":"mouse","buttons":1,"dx":3,"dy":-2,"wheel":0}
+//              {"type":"script_status","state":"running",...}  {"type":"script_log","text":"..."}
+//              {"type":"error","what":"script_begin","msg":"busy"}
 
 #include <Adafruit_TinyUSB.h>
+#include "script_engine.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -120,15 +129,19 @@ static unsigned long frames_ok = 0, frames_bad = 0;
 static bool g_watch = false;             // live event streaming over CDC
 static bool g_activity = false;          // a frame arrived (drives the LED, off the hot path)
 
-// ---- Button state: physical (from the ESP32) OR injected (from the PC) ----
+// ---- Button state: physical (from the ESP32) OR injected (PC / script) ----
 // The PC always sees the union, so an injected click never releases a button
-// the user is holding, and passthrough never swallows an injected click.
+// the user is holding, and passthrough never swallows an injected click. A
+// script can hide physical buttons from the PC (SetMouseButtonBlocked).
 static uint8_t  g_phys_buttons = 0;      // last state reported by the real mouse
 static uint8_t  g_inj_buttons  = 0;      // buttons currently held by injected clicks
 static uint8_t  g_inj_pending  = 0;      // bit i set = injected button i awaits release
 static uint32_t g_inj_release_ms[5];
+static uint8_t  g_scr_buttons  = 0;      // buttons held by the Lua script
 
-static inline uint8_t effButtons() { return g_phys_buttons | g_inj_buttons; }
+static inline uint8_t effButtons() {
+  return (g_phys_buttons & ~scriptBlockedMask()) | g_inj_buttons | g_scr_buttons;
+}
 
 static inline int32_t clampi(int32_t v, int32_t lo, int32_t hi) {
   return v < lo ? lo : (v > hi ? hi : v);
@@ -243,7 +256,9 @@ static void handleFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
   int8_t  wheel = (int8_t)payload[5];
   int8_t  pan   = (int8_t)payload[6];
 
+  uint8_t prev = g_phys_buttons;
   g_phys_buttons = payload[0];
+  if (prev != g_phys_buttons) scriptOnButtons(prev, g_phys_buttons);   // non-blocking queue push
   enqueueReport(effButtons(), dx, dy, wheel, pan);
   flushReports();          // out on the very next IN poll if the endpoint is idle
 
@@ -335,6 +350,11 @@ static void ackWhat(const char *what) {
 //                   Pico's share of the added latency, not the end-to-end total.
 //   merged        : total reports folded into an earlier one (was: dropped).
 //   q_hwm         : deepest the outbound queue got since the previous status.
+//   script        : Lua script state, "idle" / "loading" / "running".
+static const char *scriptStateName(ScriptState s) {
+  return s == SCRIPT_RUNNING ? "running" : s == SCRIPT_LOADING ? "loading" : "idle";
+}
+
 static void emitStatus() {
   static unsigned long last_ms = 0, last_ok = 0, last_sent = 0;
   unsigned long now = millis();
@@ -344,17 +364,79 @@ static void emitStatus() {
   unsigned long tx_hz = (st_sent - last_sent) * 1000UL / dt;
   unsigned long lat_avg = st_lat_n ? st_lat_sum / st_lat_n : 0;
 
-  char b[256];
+  char b[320];
   int n = snprintf(b, sizeof(b),
     "{\"type\":\"status\",\"uptime_ms\":%lu,\"esp_alive\":%s,\"frames_ok\":%lu,\"frames_bad\":%lu,\"watching\":%s,"
-    "\"rx_hz\":%lu,\"tx_hz\":%lu,\"lat_avg_us\":%lu,\"lat_max_us\":%lu,\"merged\":%lu,\"q_hwm\":%u}\n",
+    "\"rx_hz\":%lu,\"tx_hz\":%lu,\"lat_avg_us\":%lu,\"lat_max_us\":%lu,\"merged\":%lu,\"q_hwm\":%u,\"script\":\"%s\"}\n",
     now, frames_ok > 0 ? "true" : "false", frames_ok, frames_bad,
     g_watch ? "true" : "false",
-    rx_hz, tx_hz, lat_avg, (unsigned long)st_lat_max, st_merged, (unsigned)st_qhwm);
+    rx_hz, tx_hz, lat_avg, (unsigned long)st_lat_max, st_merged, (unsigned)st_qhwm,
+    scriptStateName(scriptInfo().state));
   cdcWrite(b, n);
 
   last_ms = now;  last_ok = frames_ok;  last_sent = st_sent;
   st_lat_sum = 0;  st_lat_n = 0;  st_lat_max = 0;  st_qhwm = 0;
+}
+
+// ---- Lua script plumbing (engine itself is in script_engine.cpp, on core 1) ----
+static void emitScriptStatus() {
+  ScriptInfo si = scriptInfo();
+  char b[192];
+  int n = snprintf(b, sizeof(b),
+    "{\"type\":\"script_status\",\"state\":\"%s\",\"len\":%lu,\"saved\":%s,\"mem\":%lu,\"mem_max\":%lu,\"log_dropped\":%lu}\n",
+    scriptStateName(si.state), (unsigned long)si.len, si.saved ? "true" : "false",
+    (unsigned long)si.mem, (unsigned long)si.mem_max, (unsigned long)si.log_dropped);
+  cdcWrite(b, n);
+}
+
+static void errWhat(const char *what, const char *msg) {
+  char b[96];
+  int n = snprintf(b, sizeof(b), "{\"type\":\"error\",\"what\":\"%s\",\"msg\":\"%s\"}\n", what, msg);
+  cdcWrite(b, n);
+}
+
+// Log text is the script's own, so it gets real JSON escaping. A line that
+// doesn't fit the CDC FIFO right now is dropped (never stall passthrough).
+static void drainScriptLog() {
+  for (int i = 0; i < 2; i++) {                        // small budget per pass, like drainEvts()
+    char text[124];
+    ScriptLogKind k = scriptPollLog(text, sizeof(text));
+    if (k == LOG_NONE) return;
+    if (k == LOG_CLEAR) {
+      static const char clr[] = "{\"type\":\"script_log\",\"clear\":true}\n";
+      cdcWrite(clr, sizeof(clr) - 1);
+      continue;
+    }
+    char b[160 + 6 * 16];
+    int n = snprintf(b, sizeof(b), "{\"type\":\"script_log\",\"text\":\"");
+    for (const char *p = text; *p && n < (int)sizeof(b) - 16; p++) {
+      unsigned char c = (unsigned char)*p;
+      if (c == '"' || c == '\\') { b[n++] = '\\'; b[n++] = (char)c; }
+      else if (c == '\n') { b[n++] = '\\'; b[n++] = 'n'; }
+      else if (c == '\t') { b[n++] = '\\'; b[n++] = 't'; }
+      else if (c < 0x20)  n += snprintf(b + n, sizeof(b) - n, "\\u%04x", c);
+      else b[n++] = (char)c;
+    }
+    n += snprintf(b + n, sizeof(b) - n, "\"}\n");
+    cdcWrite(b, n);
+  }
+}
+
+// Apply what the script asked for. Bounded per pass so a script spamming
+// MoveMouseRelative can't starve the UART hot path; the rest waits in the queue
+// (and the script blocks on it — that is its back-pressure).
+static void applyScriptActions() {
+  ScriptAction a;
+  for (int i = 0; i < 16 && scriptPollAction(&a); i++) {
+    switch (a.kind) {
+      case ACT_MOVE:        enqueueReport(effButtons(), a.a, a.b, 0, 0); break;
+      case ACT_WHEEL:       enqueueReport(effButtons(), 0, 0, (int16_t)clampi(a.a, -32767, 32767), 0); break;
+      case ACT_PRESS:       g_scr_buttons |= (uint8_t)a.a;   enqueueReport(effButtons(), 0, 0, 0, 0); break;
+      case ACT_RELEASE:     g_scr_buttons &= ~(uint8_t)a.a;  enqueueReport(effButtons(), 0, 0, 0, 0); break;
+      case ACT_RELEASE_ALL: g_scr_buttons = 0;               enqueueReport(effButtons(), 0, 0, 0, 0); break;
+    }
+    flushReports();
+  }
 }
 
 // Forward a PC command to the ESP32 over the reverse UART (Pico GP0 -> ESP IO48),
@@ -398,6 +480,50 @@ static void releaseInjected() {
   }
 }
 
+// Upload is begin(len) -> chunk(base64)... -> end(run?). Chunks are acked with
+// the running byte count so the app can show progress; any error aborts the
+// upload and the app starts over.
+static void handleScriptCommand(const char *cmd, const char *json) {
+  const char *err = nullptr;
+  if (!strcmp(cmd, "script_begin")) {
+    long len = 0;
+    jsonInt(json, "len", &len);
+    err = scriptUploadBegin(len < 0 ? 0 : (uint32_t)len);
+  } else if (!strcmp(cmd, "script_chunk")) {
+    char d[224];
+    uint32_t got = 0;
+    if (!jsonStr(json, "d", d, sizeof(d))) err = "bad_chunk";
+    else err = scriptUploadChunk(d, &got);
+    if (!err) {
+      char b[64];
+      int n = snprintf(b, sizeof(b), "{\"type\":\"ack\",\"what\":\"script_chunk\",\"n\":%lu}\n", (unsigned long)got);
+      cdcWrite(b, n);
+      return;
+    }
+  } else if (!strcmp(cmd, "script_end")) {
+    bool run = false;
+    jsonBool(json, "run", &run);
+    err = scriptUploadEnd();
+    if (!err && run) err = scriptRun();
+  } else if (!strcmp(cmd, "script_run")) {
+    err = scriptRun();
+  } else if (!strcmp(cmd, "script_stop")) {
+    scriptStop();
+  } else if (!strcmp(cmd, "script_save")) {
+    err = scriptSave();                                // flash write: brief passthrough hiccup
+  } else if (!strcmp(cmd, "script_erase")) {
+    err = scriptErase();
+  } else if (!strcmp(cmd, "script_status")) {
+    emitScriptStatus();
+    return;
+  } else {
+    err = "unknown_cmd";
+  }
+  if (err) { errWhat(cmd, err); return; }
+  ackWhat(cmd);
+  if (strcmp(cmd, "script_begin")) emitScriptStatus();  // len / saved changed
+}
+
 static void handleCommand(const char *json) {
   char cmd[16];
   if (!jsonStr(json, "cmd", cmd, sizeof(cmd))) return;
@@ -433,6 +559,8 @@ static void handleCommand(const char *json) {
   } else if (!strcmp(cmd, "remap")) {
     sendEspCmd(json, (uint8_t)strlen(json));
     ackWhat("remap");
+  } else if (!strncmp(cmd, "script_", 7)) {
+    handleScriptCommand(cmd, json);
   } else {
     static const char err[] = "{\"type\":\"error\",\"msg\":\"unknown_cmd\"}\n";
     cdcWrite(err, sizeof(err) - 1);
@@ -484,6 +612,10 @@ void setup() {
 
   unsigned long t0 = millis();
   while (!TinyUSBDevice.mounted() && millis() - t0 < 3000) delay(10);
+
+  // Mount the script FS and start the saved script, if any. The first boot
+  // after changing the flash layout formats the partition (~1 s).
+  scriptBegin();
 }
 
 void loop() {
@@ -491,13 +623,16 @@ void loop() {
   while (Serial1.available()) feed((uint8_t)Serial1.read());
   flushReports();          // the endpoint may have become ready since last pass
 
-  // ---- Warm path: PC commands and injected-click releases. ----
+  // ---- Warm path: PC commands, injected-click releases, script output. ----
   pollCdc();
   releaseInjected();
+  applyScriptActions();
 
   // ---- Cold path: formatting, LED, status. Runs after the hot path so it can
   // only ever delay the NEXT pass, and the 256-byte UART FIFO absorbs that. ----
   drainEvts();
+  drainScriptLog();
+  if (scriptStateChanged()) emitScriptStatus();
 
   if (g_activity) {        // rate-limited activity blink (was a pin toggle per frame)
     g_activity = false;

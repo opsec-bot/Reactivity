@@ -135,7 +135,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3usbotg:USBMode=hwcdc,CDCOnBoot=def
 arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32s3usbotg:USBMode=hwcdc ./firmware/esp32_host
 
 # Pico (device side)
-arduino-cli compile --fqbn rp2040:rp2040:rpipico:flash=2097152_0,usbstack=tinyusb ./firmware/pico_device
+arduino-cli compile --fqbn rp2040:rp2040:rpipico:flash=2097152_65536,usbstack=tinyusb ./firmware/pico_device
 arduino-cli upload -p /dev/ttyACM0 --fqbn rp2040:rp2040:rpipico ./firmware/pico_device
 ```
 
